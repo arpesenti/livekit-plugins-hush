@@ -88,7 +88,7 @@ Measured on ARM64 Linux. Steady-state throughput supports 100+ concurrent sessio
 
 ## ONNX model
 
-The ONNX model is exported from the public PyTorch checkpoint ([weya-ai/hush](https://huggingface.co/weya-ai/hush)). Export is reproducible via the script at `scripts/verify_onnx_export.py`, which also validates the ONNX output against the original PyTorch model.
+The ONNX model bundle is from the public PyTorch checkpoint ([weya-ai/hush](https://huggingface.co/weya-ai/hush)). Output parity is verified via `scripts/verify_against_pytorch.py`, which compares the ONNX pipeline output against the original PyTorch model.
 
 ---
 

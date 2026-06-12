@@ -14,7 +14,7 @@ from livekit.plugins.hush._hush_model import (
     _CHUNK_SAMPLES,
     _SAMPLE_RATE,
 )
-from livekit.plugins.hush.noise_suppressor import _DEFAULT_MODEL_DIR, _DEFAULT_MODEL_FILE
+from livekit.plugins.hush.noise_suppressor import _DEFAULT_MODEL_DIR
 
 
 def read_wav(path: str) -> tuple[np.ndarray, int]:
@@ -55,7 +55,7 @@ def main():
     originals_dir = os.path.join(docs_dir, "originals")
 
     model_path = os.path.join(
-        os.path.dirname(__file__), "..", "src", "livekit", "plugins", "hush", "models", "hush_dfnet_se.onnx"
+        os.path.dirname(__file__), "..", "src", "livekit", "plugins", "hush", "models"
     )
 
     print("Loading Hush model...")

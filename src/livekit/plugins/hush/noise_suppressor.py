@@ -35,7 +35,6 @@ from ._hush_model import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
-_DEFAULT_MODEL_FILE = "hush_dfnet_se.onnx"
 
 
 class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
@@ -52,7 +51,7 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
     Parameters
     ----------
     model_path : str, optional
-        Path to the exported ONNX model file.
+        Path to the directory containing enc.onnx, erb_dec.onnx, df_dec.onnx.
     atten_lim_db : float
         Maximum attenuation in dB (default 100.0 = unlimited).
     strength : float
@@ -69,7 +68,7 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         debug_logging: bool = False,
     ) -> None:
         if model_path is None:
-            model_path = os.path.join(_DEFAULT_MODEL_DIR, _DEFAULT_MODEL_FILE)
+            model_path = _DEFAULT_MODEL_DIR
 
         # Shared ONNX model (one per process, loaded lazily on first use)
         shared_model = _get_shared_model(model_path, atten_lim_db)

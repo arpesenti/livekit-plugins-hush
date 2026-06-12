@@ -31,7 +31,7 @@ def noise_suppression(
     Parameters
     ----------
     model_path : str, optional
-        Path to the exported ONNX model file.
+        Path to directory containing enc.onnx, erb_dec.onnx, df_dec.onnx.
     atten_lim_db : float
         Maximum attenuation in dB (default 100.0).
     strength : float

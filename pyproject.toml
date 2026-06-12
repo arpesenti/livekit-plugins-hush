@@ -39,4 +39,4 @@ Repository = "https://github.com/arpesenti/livekit-plugins-hush"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"livekit.plugins.hush" = ["models/*.onnx"]
+"livekit.plugins.hush" = ["models/*.onnx", "models/*.ini"]
