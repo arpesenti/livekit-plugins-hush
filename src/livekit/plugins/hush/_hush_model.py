@@ -89,7 +89,7 @@ class HushModel:
         if not os.path.exists(model_path):
             raise FileNotFoundError(
                 f"ONNX model not found: {model_path}\n"
-                "Run download_files() or re-export from PyTorch checkpoint."
+                f"Please ensure the model file is present at the expected location."
             )
 
         self.session = ort.InferenceSession(
