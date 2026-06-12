@@ -279,6 +279,6 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         if self._upsampler is not None:
             del self._upsampler
             self._upsampler = None
-        if hasattr(self, "_session"):
+        if self._session is not None:
             self._session.close()
             self._session = None
