@@ -359,11 +359,12 @@ class TestCoverageGaps:
         # Should be unmodified (still buffering)
         np.testing.assert_array_almost_equal(out, samples, decimal=4)
 
-    def test_download_files(self):
-        """download_files is importable and callable."""
-        from livekit.plugins.hush import download_files
+    def test_model_not_found_raises(self):
+        """Nonexistent model path raises FileNotFoundError."""
+        from livekit.plugins.hush._hush_model import HushModel
 
-        assert callable(download_files)
+        with pytest.raises(FileNotFoundError):
+            HushModel(model_path="/nonexistent/path.onnx")
 
     def test_process_chunk_2d_input(self):
         """Model handles 2D array input correctly."""

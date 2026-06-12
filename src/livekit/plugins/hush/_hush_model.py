@@ -223,39 +223,3 @@ class HushSession:
 
     def close(self) -> None:
         pass
-
-
-# ------------------------------------------------------------------ #
-# Model download                                                       #
-# ------------------------------------------------------------------ #
-
-
-def download_files(models_dir: str | None = None) -> None:
-    """Download the ONNX model from HuggingFace.
-
-    Note: This downloads the pre-exported ONNX model from HuggingFace if
-    the self-exported version is not present. For full auditability,
-    re-export from the PyTorch checkpoint.
-
-    Skips files already present.
-    """
-    models_dir = models_dir or _DEFAULT_MODEL_DIR
-    os.makedirs(models_dir, exist_ok=True)
-
-    dest = os.path.join(models_dir, _DEFAULT_MODEL_FILE)
-    if os.path.exists(dest):
-        logger.info("Model already present: %s", dest)
-        return
-
-    import urllib.request
-
-    logger.info("Downloading model from HuggingFace (weya-ai/hush)...")
-    urllib.request.urlretrieve(
-        "https://huggingface.co/weya-ai/hush/resolve/main/"
-        "onnx/advanced_dfnet16k_model_best_onnx.tar.gz",
-        os.path.join(models_dir, "advanced_dfnet16k_model_best_onnx.tar.gz"),
-    )
-    logger.info(
-        "Downloaded ONNX bundle. Extract and use with the sub-models, "
-        "or re-export from PyTorch checkpoint for the single-file format."
-    )

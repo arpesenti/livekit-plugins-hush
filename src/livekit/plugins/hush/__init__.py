@@ -2,7 +2,6 @@ from livekit.agents import Plugin
 import logging
 
 from .noise_suppressor import HushNoiseSuppressor
-from ._hush_model import download_files
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +15,6 @@ class HushPlugin(Plugin):
             logger=logger,
         )
 
-    def download_files(self):
-        download_files()
-
 
 def noise_suppression(**kwargs) -> HushNoiseSuppressor:
     """Create a HushNoiseSuppressor instance.
@@ -29,8 +25,6 @@ def noise_suppression(**kwargs) -> HushNoiseSuppressor:
     ----------
     model_path : str, optional
         Path to the exported ONNX model file.
-    chunk_frames : int
-        Frames per inference chunk (default 32 = 320ms latency).
     atten_lim_db : float
         Maximum attenuation in dB (default 100.0).
     strength : float
@@ -43,4 +37,4 @@ def noise_suppression(**kwargs) -> HushNoiseSuppressor:
 
 Plugin.register_plugin(HushPlugin())
 
-__all__ = ["HushNoiseSuppressor", "noise_suppression", "download_files"]
+__all__ = ["HushNoiseSuppressor", "noise_suppression"]
