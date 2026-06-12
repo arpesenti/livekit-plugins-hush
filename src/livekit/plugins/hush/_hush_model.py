@@ -130,6 +130,10 @@ class HushSession:
         # Saved tail of the previous chunk for warm-up overlap
         self._prev_tail = None
 
+        # Crossfade: last CROSSFADE_SAMPLES of previous chunk's output
+        self._crossfade_samples = _HOP_SIZE  # 160 samples = 10ms
+        self._prev_output_tail = None
+
     def _enhance_spectrum(self, spec_chunk, erb_chunk, sf_chunk,
                           prev_df_tail=None):
         """Run the model on one batch of spectrum frames.
@@ -249,13 +253,25 @@ class HushSession:
         delay = _FFT_SIZE - _HOP_SIZE
         audio_out = audio_out[:, delay : delay + num_samples]
 
+        # Crossfade with previous chunk's tail to smooth STFT boundary
+        n_cf = self._crossfade_samples
+        if self._prev_output_tail is not None and n_cf > 0:
+            ramp = np.linspace(0, 1, n_cf, dtype=np.float32)
+            audio_out[0, :n_cf] = (
+                self._prev_output_tail * (1 - ramp) + audio_out[0, :n_cf] * ramp
+            )
+        # Save tail for next chunk's crossfade
+        if n_cf > 0:
+            self._prev_output_tail = audio_out[0, -n_cf:].copy()
+
         if audio_squeezed:
             return audio_out[0]
         return audio_out.reshape(audio.shape)
 
     def reset_state(self):
-        """Reset warm-up state for a new audio stream."""
+        """Reset warm-up and crossfade state for a new audio stream."""
         self._prev_tail = None
+        self._prev_output_tail = None
 
     def close(self):
         self._df = None
@@ -263,3 +279,4 @@ class HushSession:
         self._erb_dec_sess = None
         self._df_dec_sess = None
         self._prev_tail = None
+        self._prev_output_tail = None

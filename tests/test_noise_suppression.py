@@ -498,6 +498,72 @@ class TestCoverageGaps:
         # Output length must match input length (trim/pad logic exercised)
         assert result.samples_per_channel == 16000
 
+    @pytest.mark.skipif(
+        not _model_available(),
+        reason="ONNX model not available",
+    )
+    def test_clean_speech_preservation(self):
+        """Clean speech should pass through with minimal distortion."""
+        from livekit.plugins.hush._hush_model import HushModel, HushSession
+        import wave, os
+
+        # Load clean speech sample
+        speech_path = os.path.join(
+            os.path.dirname(__file__), "..", "docs", "audio", "originals", "speech.wav"
+        )
+        with wave.open(speech_path, "rb") as wf:
+            n_frames = wf.getnframes()
+            speech = np.frombuffer(
+                wf.readframes(n_frames), dtype=np.int16
+            ).astype(np.float32) / 32768.0
+
+        # Process in streaming mode — the harder case
+        model = HushModel()
+        session = HushSession(model)
+        chunk_samples = 5120
+        output = np.empty(len(speech), dtype=np.float32)
+        pos = 0
+        while pos < len(speech):
+            end = min(pos + chunk_samples, len(speech))
+            chunk = speech[pos:end]
+            if len(chunk) < chunk_samples:
+                chunk = np.pad(chunk, (0, chunk_samples - len(chunk)))
+            denoised = session.process_chunk(chunk)
+            n_out = min(len(denoised), end - pos)
+            output[pos:pos+n_out] = denoised[:n_out]
+            pos += chunk_samples
+        session.close()
+
+        in_rms = np.sqrt(np.mean(speech**2))
+        out_rms = np.sqrt(np.mean(output**2))
+        out_peak = np.max(np.abs(output))
+
+        # Output should retain reasonable energy (clean speech shouldn't
+        # be aggressively suppressed — the model is designed to pass speech)
+        assert out_rms > in_rms * 0.3, (
+            f"Output too quiet: out_rms={out_rms:.4f} in_rms={in_rms:.4f} "
+            f"ratio={out_rms/in_rms:.3f}"
+        )
+
+        # No clipping artifacts
+        assert out_peak < 1.5, (
+            f"Output peak too high (clipping): {out_peak:.4f}"
+        )
+
+        # Positive correlation with input in speech regions
+        chunk = 16000  # 1-second segments
+        corrs = []
+        for i in range(0, len(speech) - chunk, chunk):
+            seg_in = speech[i:i+chunk]
+            seg_out = output[i:i+chunk]
+            if np.sqrt(np.mean(seg_in**2)) > 0.01:
+                corrs.append(np.corrcoef(seg_in, seg_out)[0, 1])
+
+        avg_corr = np.mean(corrs)
+        assert avg_corr > 0.0, (
+            f"Anti-correlated with input: avg_corr={avg_corr:.4f}"
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
