@@ -75,7 +75,7 @@ class HushModel:
     model_path : str, optional
         Path to the exported ONNX model file.
     atten_lim_db : float
-        Maximum attenuation in dB (informational).
+        Maximum attenuation in dB.
     """
 
     def __init__(
@@ -133,6 +133,7 @@ class HushSession:
 
     def __init__(self, model: HushModel) -> None:
         self._session = model.session
+        self._atten_lim_db = model._atten_lim_db
 
         # Per-session DF state for feature extraction / synthesis
         self._df = DF(
@@ -203,6 +204,15 @@ class HushSession:
 
         # Convert back to complex
         enhanced_c = enhanced[0, 0, :, :, 0] + 1j * enhanced[0, 0, :, :, 1]
+
+        # Apply attenuation limit per frequency bin
+        input_mag = np.abs(spec[0])
+        enhanced_mag = np.abs(enhanced_c)
+        gain = enhanced_mag / (input_mag + 1e-10)
+        min_gain = 10.0 ** (-self._atten_lim_db / 20.0)
+        gain_limited = np.maximum(gain, min_gain)
+        ratio = gain_limited / (gain + 1e-10)
+        enhanced_c = enhanced_c * ratio
 
         # ISTFT synthesis (expects 3D: [B, T, F])
         audio_out = self._df.synthesis(enhanced_c[np.newaxis, :, :], reset=True)
