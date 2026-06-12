@@ -184,14 +184,15 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
 
             self._output_queue = np.concatenate([self._output_queue, chunk_out])
 
-            if self._debug_logging and self._debug_chunk_count % 10 == 0:
-                logger.debug(
-                    "Hush chunk: input_rms=%.5f output_rms=%.5f strength=%.2f",
-                    float(np.sqrt(np.mean(chunk_in**2))),
-                    float(np.sqrt(np.mean(chunk_out**2))),
-                    self._strength,
-                )
-            self._debug_chunk_count += 1
+            if self._debug_logging:
+                if self._debug_chunk_count % 10 == 0:
+                    logger.debug(
+                        "Hush chunk: input_rms=%.5f output_rms=%.5f strength=%.2f",
+                        float(np.sqrt(np.mean(chunk_in**2))),
+                        float(np.sqrt(np.mean(chunk_out**2))),
+                        self._strength,
+                    )
+                self._debug_chunk_count += 1
 
         # Drain the same number of samples that went IN
         n_16k = len(samples_16k)
