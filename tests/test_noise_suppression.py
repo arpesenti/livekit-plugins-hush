@@ -259,8 +259,8 @@ class TestIntegration:
             f"Expected noise reduction, out_rms={out_rms:.3f} >= in_rms={in_rms:.3f}"
         )
 
-    def test_chunk_variable_sizes(self):
-        """Model should handle different input lengths (padded to 32 frames)."""
+    def test_chunk_32_frames(self):
+        """Model processes exactly 32 frames (5120 samples @ 16 kHz)."""
         from livekit.plugins.hush._hush_model import HushModel, HushSession
 
         model = HushModel()
