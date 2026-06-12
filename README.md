@@ -96,14 +96,14 @@ The ONNX model is exported from the public PyTorch checkpoint ([weya-ai/hush](ht
 
 Noisy originals and their denoised counterparts processed with Hush (strength=0.5):
 
-| Original | Denoised |
-|---|---|
-| <audio controls src="docs/audio/originals/gym.wav"></audio> | <audio controls src="docs/audio/hush-gym.wav"></audio> |
-| <audio controls src="docs/audio/originals/krisp-original.wav"></audio> | <audio controls src="docs/audio/hush-krisp-original.wav"></audio> |
-| <audio controls src="docs/audio/originals/noproblem_raw.wav"></audio> | <audio controls src="docs/audio/hush-noproblem_raw.wav"></audio> |
-| <audio controls src="docs/audio/originals/taxi-sample.wav"></audio> | <audio controls src="docs/audio/hush-taxi-sample.wav"></audio> |
+| | Original | Denoised |
+|---|---|---|
+| **Gym** | <video controls src="docs/audio/originals/gym.mp4" width="200"></video> | <video controls src="docs/audio/hush-gym.mp4" width="200"></video> |
+| **Krisp** | <video controls src="docs/audio/originals/krisp-original.mp4" width="200"></video> | <video controls src="docs/audio/hush-krisp-original.mp4" width="200"></video> |
+| **No problem** | <video controls src="docs/audio/originals/noproblem_raw.mp4" width="200"></video> | <video controls src="docs/audio/hush-noproblem_raw.mp4" width="200"></video> |
+| **Taxi** | <video controls src="docs/audio/originals/taxi-sample.mp4" width="200"></video> | <video controls src="docs/audio/hush-taxi-sample.mp4" width="200"></video> |
 
-Downloads: [`originals/`](docs/audio/originals/) · [`hush-processed/`](docs/audio/)
+WAV downloads: [`originals/`](docs/audio/originals/) · [`hush-processed/`](docs/audio/)
 
 ---
 
