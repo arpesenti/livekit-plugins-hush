@@ -3,7 +3,7 @@
 Verifies the exported ONNX model produces identical output to the original
 PyTorch implementation. Requires PyTorch — install with:
 
-    pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+    pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 Run:
 
@@ -50,7 +50,13 @@ def test_onnx_vs_pytorch() -> None:
     pt_model = DfNetSE(config)
     ckpt_path = os.environ.get("HUSH_CKPT", "model_best.ckpt")
     if not os.path.exists(ckpt_path):
-        from huggingface_hub import hf_hub_download
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError:
+            print("Checkpoint not found and huggingface_hub not installed.")
+            print("Install with: pip install huggingface_hub")
+            print("Or set HUSH_CKPT=/path/to/model_best.ckpt")
+            sys.exit(1)
 
         ckpt_path = hf_hub_download("weya-ai/hush", "model_best.ckpt")
 
