@@ -273,6 +273,78 @@ class TestIntegration:
         assert len(result) == 32 * 160
         assert result.dtype == np.float32
 
+    def test_end_to_end_process(self):
+        """End-to-end HushNoiseSuppressor._process with real model."""
+        from livekit.plugins.hush import HushNoiseSuppressor
+
+        ns = HushNoiseSuppressor(strength=1.0)
+        rng = np.random.default_rng(42)
+        samples = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
+        frame = create_audio_frame(samples)
+        result = ns._process(frame)
+        out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+        assert len(out) == 5120
+        assert result.sample_rate == 16000
+        assert result.num_channels == 1
+
+    def test_stereo_with_real_model(self):
+        """Stereo input through _process with real model."""
+        from livekit.plugins.hush import HushNoiseSuppressor
+
+        ns = HushNoiseSuppressor(strength=1.0)
+        rng = np.random.default_rng(42)
+        samples = rng.uniform(-0.5, 0.5, 5120 * 2).astype(np.float32)
+        int16_data = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+        frame = rtc.AudioFrame(
+            data=int16_data.tobytes(),
+            sample_rate=16000,
+            num_channels=2,
+            samples_per_channel=5120,
+        )
+        result = ns._process(frame)
+        assert result.num_channels == 2
+        assert result.samples_per_channel == 5120
+        out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+        assert len(out) == 5120 * 2
+
+    def test_resampling_with_real_model(self):
+        """48 kHz input through _process with real model."""
+        from livekit.plugins.hush import HushNoiseSuppressor
+
+        ns = HushNoiseSuppressor(strength=1.0)
+        rng = np.random.default_rng(42)
+        samples = rng.uniform(-0.5, 0.5, 15360).astype(np.float32)
+        int16_data = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+        frame = rtc.AudioFrame(
+            data=int16_data.tobytes(),
+            sample_rate=48000,
+            num_channels=1,
+            samples_per_channel=15360,
+        )
+        result = ns._process(frame)
+        assert result.sample_rate == 48000
+        assert result.samples_per_channel == 15360
+        out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+        assert len(out) == 15360
+
+    def test_multi_chunk_continuity_with_real_model(self):
+        """Consecutive chunks produce continuous non-silent output."""
+        from livekit.plugins.hush import HushNoiseSuppressor
+
+        ns = HushNoiseSuppressor(strength=1.0)
+        rng = np.random.default_rng(42)
+        outputs = []
+        for _ in range(5):
+            samples = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
+            frame = create_audio_frame(samples)
+            result = ns._process(frame)
+            out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+            outputs.append(out)
+
+        for i, out in enumerate(outputs):
+            assert len(out) == 5120, f"Frame {i} output length mismatch"
+            assert np.sqrt(np.mean(out**2)) > 1e-6, f"Frame {i} is silent"
+
 
 # ------------------------------------------------------------------ #
 # Coverage gap tests                                                    #
