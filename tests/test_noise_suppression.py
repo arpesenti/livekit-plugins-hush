@@ -366,6 +366,10 @@ class TestCoverageGaps:
         with pytest.raises(FileNotFoundError):
             HushModel(model_path="/nonexistent/path.onnx")
 
+    @pytest.mark.skipif(
+        not _model_available(),
+        reason="ONNX model not available",
+    )
     def test_process_chunk_2d_input(self):
         """Model handles 2D array input correctly."""
         from livekit.plugins.hush._hush_model import HushModel, HushSession
@@ -382,13 +386,19 @@ class TestCoverageGaps:
         assert out_2d.shape == (1, 32 * 160)
         np.testing.assert_array_almost_equal(out_1d, out_2d[0], decimal=4)
 
+    @pytest.mark.skipif(
+        not _model_available(),
+        reason="ONNX model not available",
+    )
     def test_process_chunk_too_short(self):
-        """Audio shorter than 32 frames raises ValueError."""
+        """Audio with fewer than 32 frames raises ValueError."""
         from livekit.plugins.hush._hush_model import HushModel, HushSession
 
         model = HushModel()
         session = HushSession(model)
-        short = np.array([0.1, -0.2, 0.05], dtype=np.float32)
+        # 16 frames (2560 samples) — S=16, which is < 32 but > 0
+        rng = np.random.default_rng(42)
+        short = rng.uniform(-0.5, 0.5, 16 * 160).astype(np.float32)
         with pytest.raises(ValueError, match="requires exactly 32 frames"):
             session.process_chunk(short)
 
