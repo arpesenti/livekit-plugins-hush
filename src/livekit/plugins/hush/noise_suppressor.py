@@ -109,15 +109,19 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
 
         # Lazily create resamplers when we learn the incoming sample rate
         if frame.sample_rate != self._native_rate:
-            # Flush existing resamplers before recreating them so internal
+            # Flush existing resamplers before destroying them so internal
             # filter state / buffered samples are drained rather than lost.
             if self._downsampler is not None:
                 flushed = self._downsampler.flush()
                 for f in flushed:
                     s = np.frombuffer(f.data, dtype=np.int16).astype(np.float32) / 32768.0
                     self._input_queue = np.concatenate([self._input_queue, s])
+                del self._downsampler
+                self._downsampler = None
             if self._upsampler is not None:
                 self._upsampler.flush()
+                del self._upsampler
+                self._upsampler = None
 
             self._native_rate = frame.sample_rate
             if frame.sample_rate != _SAMPLE_RATE:
@@ -133,9 +137,6 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
                     num_channels=1,
                     quality=rtc.AudioResamplerQuality.MEDIUM,
                 )
-            else:
-                self._downsampler = None
-                self._upsampler = None
 
         # Convert int16 → float32 mono
         samples = np.frombuffer(frame.data, dtype=np.int16).astype(np.float32) / 32768.0
@@ -248,6 +249,12 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
 
     def _close(self) -> None:
         self._enabled = False
+        if self._downsampler is not None:
+            del self._downsampler
+            self._downsampler = None
+        if self._upsampler is not None:
+            del self._upsampler
+            self._upsampler = None
         if hasattr(self, "_session"):
             self._session.close()
             self._session = None
