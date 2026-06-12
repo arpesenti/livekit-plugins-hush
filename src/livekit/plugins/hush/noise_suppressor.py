@@ -257,6 +257,20 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
             samples_per_channel=frame.samples_per_channel,
         )
 
+    def __del__(self) -> None:
+        self._close()
+
+    def __enter__(self) -> "HushNoiseSuppressor":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[type],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[object],
+    ) -> None:
+        self._close()
+
     def _close(self) -> None:
         self._enabled = False
         if self._downsampler is not None:
