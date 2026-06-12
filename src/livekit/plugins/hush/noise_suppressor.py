@@ -30,7 +30,6 @@ from ._hush_model import (
     _CHUNK_SAMPLES,
     _SAMPLE_RATE,
     _get_shared_model,
-    download_files,
 )
 
 logger = logging.getLogger(__name__)
