@@ -340,8 +340,8 @@ class TestCoverageGaps:
         ns._close()
         assert ns.enabled is False
 
-    def test_short_audio_returns_early(self, monkeypatch):
-        """Audio shorter than hop_size (160 samples) returns immediately."""
+    def test_short_audio_buffers_during_startup(self, monkeypatch):
+        """Audio shorter than a chunk is buffered; original frame returned during startup latency."""
         _patch_module(monkeypatch)
         import livekit.plugins.hush.noise_suppressor as ns_module
 
