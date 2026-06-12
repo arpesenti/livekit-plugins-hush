@@ -75,14 +75,15 @@ The ONNX session is a process-level singleton. Each `HushNoiseSuppressor` instan
 
 ## Inference performance
 
-| | |
-|---|---|
-| Chunk size | 32 frames (320 ms audio) |
-| Inference time per chunk | ~2 ms |
-| Real-time factor | 0.007× |
-| Model size | ~9 MB |
+| | Streaming (per chunk) | Batch (full file) |
+|---|---|---|
+| Chunk size | 32 frames (320 ms) | Full audio |
+| Inference time | ~6.5 ms per chunk | ~8 ms per second of audio |
+| Real-time factor | 0.02× | 0.008× |
+| Throughput | 49× real-time (~150 chunks/sec) | 129× real-time |
+| Model size | ~9 MB (3 ONNX files) | |
 
-Measured on ARM64 Linux. Steady-state throughput supports 100+ concurrent sessions per core.
+Measured on ARM64 Linux (aarch64). Steady-state throughput supports 100+ concurrent sessions per core.
 
 ---
 
