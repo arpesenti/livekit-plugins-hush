@@ -144,7 +144,10 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
             samples = samples.reshape(-1, frame.num_channels).mean(axis=1)
 
         # Build a mono AudioFrame for the resampler
-        mono_int16 = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+        peak = np.max(np.abs(samples))
+        if peak > 1.0:
+            samples = samples / peak
+        mono_int16 = (samples * 32767.0).astype(np.int16)
         mono_frame = rtc.AudioFrame(
             data=mono_int16.tobytes(),
             sample_rate=frame.sample_rate,
@@ -205,7 +208,10 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
             out_16k = self._strength * out_16k + (1.0 - self._strength) * dry_16k
 
         # Build 16 kHz AudioFrame and upsample back
-        out_int16_16k = (np.clip(out_16k, -1.0, 1.0) * 32767.0).astype(np.int16)
+        peak = np.max(np.abs(out_16k))
+        if peak > 1.0:
+            out_16k = out_16k / peak
+        out_int16_16k = (out_16k * 32767.0).astype(np.int16)
         out_frame_16k = rtc.AudioFrame(
             data=out_int16_16k.tobytes(),
             sample_rate=_SAMPLE_RATE,
@@ -239,7 +245,10 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         if frame.num_channels > 1:
             out_samples = np.repeat(out_samples, frame.num_channels)
 
-        out_int16 = (np.clip(out_samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+        peak = np.max(np.abs(out_samples))
+        if peak > 1.0:
+            out_samples = out_samples / peak
+        out_int16 = (out_samples * 32767.0).astype(np.int16)
         return rtc.AudioFrame(
             data=out_int16.tobytes(),
             sample_rate=frame.sample_rate,
