@@ -132,7 +132,6 @@ class HushSession:
     """
 
     def __init__(self, model: HushModel) -> None:
-        self._model = model
         self._session = model.session
 
         # Per-session DF state for feature extraction / synthesis
@@ -226,4 +225,3 @@ class HushSession:
         # Drop DF reference so tp_dealloc frees C-level analysis/synthesis buffers
         self._df = None
         self._session = None
-        self._model = None
