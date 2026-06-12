@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "livekit-plugins-hush"
 version = "0.1.0"
-description = "Hush noise suppression plugin for LiveKit Agents — self-hosted, in-process, no cloud API"
+description = "Hush noise suppression plugin for LiveKit Agents"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -31,9 +31,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/anomalyco/livekit-plugins-hush"
-Repository = "https://github.com/anomalyco/livekit-plugins-hush"
-"Bug Tracker" = "https://github.com/anomalyco/livekit-plugins-hush/issues"
+Homepage = "https://github.com/arpesenti/livekit-plugins-hush"
+Repository = "https://github.com/arpesenti/livekit-plugins-hush"
+"Bug Tracker" = "https://github.com/arpesenti/livekit-plugins-hush/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
