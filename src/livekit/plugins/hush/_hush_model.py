@@ -223,4 +223,7 @@ class HushSession:
         return audio_out.reshape(audio.shape)
 
     def close(self) -> None:
-        pass
+        # Drop DF reference so tp_dealloc frees C-level analysis/synthesis buffers
+        self._df = None
+        self._session = None
+        self._model = None
