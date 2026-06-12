@@ -167,10 +167,11 @@ class HushSession:
         num_samples = audio.shape[1]
         S = num_samples // _HOP_SIZE
 
-        if S == 0:
-            if audio_squeezed:
-                return audio[0]
-            return audio
+        if S != _CHUNK_FRAMES:
+            raise ValueError(
+                f"process_chunk requires exactly {_CHUNK_FRAMES} frames "
+                f"({_CHUNK_SAMPLES} samples), got {S} frames ({num_samples} samples)"
+            )
 
         # Pad for STFT: need fft_size extra samples
         padded_len = S * _HOP_SIZE + _FFT_SIZE

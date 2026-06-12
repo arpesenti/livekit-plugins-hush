@@ -383,15 +383,14 @@ class TestCoverageGaps:
         np.testing.assert_array_almost_equal(out_1d, out_2d[0], decimal=4)
 
     def test_process_chunk_too_short(self):
-        """Audio shorter than hop_size returns unchanged."""
+        """Audio shorter than 32 frames raises ValueError."""
         from livekit.plugins.hush._hush_model import HushModel, HushSession
 
         model = HushModel()
         session = HushSession(model)
         short = np.array([0.1, -0.2, 0.05], dtype=np.float32)
-        result = session.process_chunk(short)
-        assert len(result) == 3
-        np.testing.assert_array_equal(result, short)
+        with pytest.raises(ValueError, match="requires exactly 32 frames"):
+            session.process_chunk(short)
 
     def test_trim_pad_output(self, monkeypatch):
         """Output trimming and padding paths when resampler length mismatches."""
