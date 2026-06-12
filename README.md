@@ -92,6 +92,19 @@ The ONNX model is exported from the public PyTorch checkpoint ([weya-ai/hush](ht
 
 ---
 
+## Audio samples
+
+Noisy originals and their denoised counterparts processed with Hush (strength=0.5):
+
+| Original | Denoised |
+|---|---|
+| [`gym.wav`](docs/audio/originals/gym.wav) | [`hush-gym.wav`](docs/audio/hush-gym.wav) |
+| [`krisp-original.wav`](docs/audio/originals/krisp-original.wav) | [`hush-krisp-original.wav`](docs/audio/hush-krisp-original.wav) |
+| [`noproblem_raw.wav`](docs/audio/originals/noproblem_raw.wav) | [`hush-noproblem_raw.wav`](docs/audio/hush-noproblem_raw.wav) |
+| [`taxi-sample.wav`](docs/audio/originals/taxi-sample.wav) | [`hush-taxi-sample.wav`](docs/audio/hush-taxi-sample.wav) |
+
+---
+
 ## References
 
 - [pulp-vision/Hush](https://github.com/pulp-vision/Hush) — model architecture and training code
