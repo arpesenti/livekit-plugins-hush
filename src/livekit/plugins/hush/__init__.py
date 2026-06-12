@@ -1,3 +1,5 @@
+from typing import Optional
+
 from livekit.agents import Plugin
 import logging
 
@@ -16,7 +18,12 @@ class HushPlugin(Plugin):
         )
 
 
-def noise_suppression(**kwargs) -> HushNoiseSuppressor:
+def noise_suppression(
+    model_path: Optional[str] = None,
+    atten_lim_db: float = 100.0,
+    strength: float = 0.5,
+    debug_logging: bool = False,
+) -> HushNoiseSuppressor:
     """Create a HushNoiseSuppressor instance.
 
     Pass to ``AudioInputOptions(noise_cancellation=hush.noise_suppression())``.
@@ -32,7 +39,12 @@ def noise_suppression(**kwargs) -> HushNoiseSuppressor:
     debug_logging : bool
         Log diagnostics every 10 chunks at DEBUG level.
     """
-    return HushNoiseSuppressor(**kwargs)
+    return HushNoiseSuppressor(
+        model_path=model_path,
+        atten_lim_db=atten_lim_db,
+        strength=strength,
+        debug_logging=debug_logging,
+    )
 
 
 Plugin.register_plugin(HushPlugin())
