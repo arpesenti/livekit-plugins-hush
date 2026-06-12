@@ -98,10 +98,12 @@ Noisy originals and their denoised counterparts processed with Hush (strength=0.
 
 | Original | Denoised |
 |---|---|
-| [`gym.wav`](docs/audio/originals/gym.wav) | [`hush-gym.wav`](docs/audio/hush-gym.wav) |
-| [`krisp-original.wav`](docs/audio/originals/krisp-original.wav) | [`hush-krisp-original.wav`](docs/audio/hush-krisp-original.wav) |
-| [`noproblem_raw.wav`](docs/audio/originals/noproblem_raw.wav) | [`hush-noproblem_raw.wav`](docs/audio/hush-noproblem_raw.wav) |
-| [`taxi-sample.wav`](docs/audio/originals/taxi-sample.wav) | [`hush-taxi-sample.wav`](docs/audio/hush-taxi-sample.wav) |
+| <audio controls src="docs/audio/originals/gym.wav"></audio> | <audio controls src="docs/audio/hush-gym.wav"></audio> |
+| <audio controls src="docs/audio/originals/krisp-original.wav"></audio> | <audio controls src="docs/audio/hush-krisp-original.wav"></audio> |
+| <audio controls src="docs/audio/originals/noproblem_raw.wav"></audio> | <audio controls src="docs/audio/hush-noproblem_raw.wav"></audio> |
+| <audio controls src="docs/audio/originals/taxi-sample.wav"></audio> | <audio controls src="docs/audio/hush-taxi-sample.wav"></audio> |
+
+Downloads: [`originals/`](docs/audio/originals/) · [`hush-processed/`](docs/audio/)
 
 ---
 
