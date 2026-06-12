@@ -109,6 +109,16 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
 
         # Lazily create resamplers when we learn the incoming sample rate
         if frame.sample_rate != self._native_rate:
+            # Flush existing resamplers before recreating them so internal
+            # filter state / buffered samples are drained rather than lost.
+            if self._downsampler is not None:
+                flushed = self._downsampler.flush()
+                for f in flushed:
+                    s = np.frombuffer(f.data, dtype=np.int16).astype(np.float32) / 32768.0
+                    self._input_queue = np.concatenate([self._input_queue, s])
+            if self._upsampler is not None:
+                self._upsampler.flush()
+
             self._native_rate = frame.sample_rate
             if frame.sample_rate != _SAMPLE_RATE:
                 self._downsampler = rtc.AudioResampler(
