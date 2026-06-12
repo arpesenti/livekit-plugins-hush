@@ -94,14 +94,16 @@ The ONNX model bundle is from the public PyTorch checkpoint ([weya-ai/hush](http
 
 ## Audio samples
 
-Noisy originals and their denoised counterparts processed with Hush (strength=0.5):
+Noisy originals and their denoised counterparts. Two variants are provided:
+- **Batch** (`hush-*.wav`) — full-file normalization, best quality. Matches the PyTorch `infer_single.py` pipeline.
+- **Stream** (`hush-stream-*.wav`) — per-chunk normalization, real-time quality. Matches the LiveKit frame processor in production.
 
-| Original | Denoised |
-|---|---|
-| [`gym.wav`](docs/audio/originals/gym.wav) | [`hush-gym.wav`](docs/audio/hush-gym.wav) |
-| [`krisp-original.wav`](docs/audio/originals/krisp-original.wav) | [`hush-krisp-original.wav`](docs/audio/hush-krisp-original.wav) |
-| [`noproblem_raw.wav`](docs/audio/originals/noproblem_raw.wav) | [`hush-noproblem_raw.wav`](docs/audio/hush-noproblem_raw.wav) |
-| [`taxi-sample.wav`](docs/audio/originals/taxi-sample.wav) | [`hush-taxi-sample.wav`](docs/audio/hush-taxi-sample.wav) |
+| Original | Batch | Stream |
+|---|---|---|
+| [`gym.wav`](docs/audio/originals/gym.wav) | [`hush-gym.wav`](docs/audio/hush-gym.wav) | [`hush-stream-gym.wav`](docs/audio/hush-stream-gym.wav) |
+| [`krisp-original.wav`](docs/audio/originals/krisp-original.wav) | [`hush-krisp-original.wav`](docs/audio/hush-krisp-original.wav) | [`hush-stream-krisp-original.wav`](docs/audio/hush-stream-krisp-original.wav) |
+| [`noproblem_raw.wav`](docs/audio/originals/noproblem_raw.wav) | [`hush-noproblem_raw.wav`](docs/audio/hush-noproblem_raw.wav) | [`hush-stream-noproblem_raw.wav`](docs/audio/hush-stream-noproblem_raw.wav) |
+| [`taxi-sample.wav`](docs/audio/originals/taxi-sample.wav) | [`hush-taxi-sample.wav`](docs/audio/hush-taxi-sample.wav) | [`hush-stream-taxi-sample.wav`](docs/audio/hush-stream-taxi-sample.wav) |
 
 ---
 

@@ -453,6 +453,7 @@ class TestCoverageGaps:
         audio_2d = audio_1d[np.newaxis, :]
 
         out_1d = session.process_chunk(audio_1d)
+        session.reset_state()
         out_2d = session.process_chunk(audio_2d)
         assert out_1d.shape == (32 * 160,)
         assert out_2d.shape == (1, 32 * 160)
@@ -471,7 +472,7 @@ class TestCoverageGaps:
         # 16 frames (2560 samples) — S=16, which is < 32 but > 0
         rng = np.random.default_rng(42)
         short = rng.uniform(-0.5, 0.5, 16 * 160).astype(np.float32)
-        with pytest.raises(ValueError, match="requires exactly 32 frames"):
+        with pytest.raises(ValueError, match="requires 32 frames"):
             session.process_chunk(short)
 
     def test_trim_pad_output(self, monkeypatch):
