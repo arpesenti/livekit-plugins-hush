@@ -158,7 +158,8 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         )
 
         self._input_queue = np.concatenate([self._input_queue, samples_16k])
-        self._dry_queue = np.concatenate([self._dry_queue, samples_16k])
+        if self._strength < 1.0:
+            self._dry_queue = np.concatenate([self._dry_queue, samples_16k])
 
         # Process in 32-frame chunks (5120 samples)
         while len(self._input_queue) >= _CHUNK_SAMPLES:
@@ -191,8 +192,6 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
             dry_16k = self._dry_queue[:n_16k]
             self._dry_queue = self._dry_queue[n_16k:]
             out_16k = self._strength * out_16k + (1.0 - self._strength) * dry_16k
-        else:
-            self._dry_queue = self._dry_queue[n_16k:]
 
         # Build 16 kHz AudioFrame and upsample back
         out_int16_16k = (np.clip(out_16k, -1.0, 1.0) * 32767.0).astype(np.int16)
