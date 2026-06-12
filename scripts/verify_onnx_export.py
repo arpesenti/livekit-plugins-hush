@@ -21,6 +21,7 @@ def _dependencies_available() -> bool:
         import torch  # noqa: F401
         from libdf import DF, erb, erb_norm, unit_norm  # noqa: F401
         import onnxruntime  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -156,6 +157,8 @@ def test_onnx_vs_pytorch() -> None:
 if __name__ == "__main__":
     if not _dependencies_available():
         print("SKIP: PyTorch not installed. Install with:")
-        print("  pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu")
+        print(
+            "  pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu"
+        )
         sys.exit(0)
     test_onnx_vs_pytorch()

@@ -129,9 +129,7 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
                 self._upsampler = None
 
         # Convert int16 → float32 mono
-        samples = (
-            np.frombuffer(frame.data, dtype=np.int16).astype(np.float32) / 32768.0
-        )
+        samples = np.frombuffer(frame.data, dtype=np.int16).astype(np.float32) / 32768.0
         if frame.num_channels > 1:
             samples = samples.reshape(-1, frame.num_channels).mean(axis=1)
 
@@ -153,10 +151,12 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         if not frames_16k:
             return frame
 
-        samples_16k = np.concatenate([
-            np.frombuffer(f.data, dtype=np.int16).astype(np.float32) / 32768.0
-            for f in frames_16k
-        ])
+        samples_16k = np.concatenate(
+            [
+                np.frombuffer(f.data, dtype=np.int16).astype(np.float32) / 32768.0
+                for f in frames_16k
+            ]
+        )
 
         self._input_queue = np.concatenate([self._input_queue, samples_16k])
         self._dry_queue = np.concatenate([self._dry_queue, samples_16k])
@@ -212,10 +212,12 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         if not out_frames:
             return frame
 
-        out_samples = np.concatenate([
-            np.frombuffer(f.data, dtype=np.int16).astype(np.float32) / 32768.0
-            for f in out_frames
-        ])
+        out_samples = np.concatenate(
+            [
+                np.frombuffer(f.data, dtype=np.int16).astype(np.float32) / 32768.0
+                for f in out_frames
+            ]
+        )
 
         # Trim or pad to exactly match the input frame length
         target = frame.samples_per_channel

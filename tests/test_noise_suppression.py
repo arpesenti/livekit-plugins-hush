@@ -101,8 +101,10 @@ class TestFrameProcessing:
     def test_exact_chunk(self, mock_suppressor):
         """Exactly one chunk (4 frames = 640 samples)."""
         chunk_samples = 4 * 160  # 640
-        samples = np.random.default_rng(42).uniform(-0.5, 0.5, chunk_samples).astype(
-            np.float32
+        samples = (
+            np.random.default_rng(42)
+            .uniform(-0.5, 0.5, chunk_samples)
+            .astype(np.float32)
         )
         frame = create_audio_frame(samples)
         result = mock_suppressor._process(frame)
@@ -114,8 +116,10 @@ class TestFrameProcessing:
     def test_multiple_chunks(self, mock_suppressor):
         """Two full chunks (8 frames = 1280 samples)."""
         chunk_samples = 8 * 160
-        samples = np.random.default_rng(42).uniform(-0.5, 0.5, chunk_samples).astype(
-            np.float32
+        samples = (
+            np.random.default_rng(42)
+            .uniform(-0.5, 0.5, chunk_samples)
+            .astype(np.float32)
         )
         frame = create_audio_frame(samples)
         result = mock_suppressor._process(frame)
@@ -143,7 +147,9 @@ class TestFrameProcessing:
             samples = rng.uniform(-0.5, 0.5, chunk_per_frame).astype(np.float32)
             frame = create_audio_frame(samples)
             result = mock_suppressor._process(frame)
-            out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+            out = (
+                np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+            )
             outputs.append(out)
 
         for i, out in enumerate(outputs):
@@ -241,7 +247,9 @@ class TestIntegration:
             chunk_data = noisy[i : i + chunk]
             frame = create_audio_frame(chunk_data)
             result = ns._process(frame)
-            out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+            out = (
+                np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+            )
             outputs.append(out)
 
         output = np.concatenate(outputs)

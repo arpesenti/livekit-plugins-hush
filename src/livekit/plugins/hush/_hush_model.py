@@ -175,9 +175,7 @@ class HushSession:
         # Pad for STFT: need fft_size extra samples
         padded_len = S * _HOP_SIZE + _FFT_SIZE
         if audio.shape[1] < padded_len:
-            audio_padded = np.pad(
-                audio, ((0, 0), (0, padded_len - audio.shape[1]))
-            )
+            audio_padded = np.pad(audio, ((0, 0), (0, padded_len - audio.shape[1])))
         else:
             audio_padded = audio[:, :padded_len]
 
@@ -186,17 +184,13 @@ class HushSession:
         spec = spec[:, :S]
 
         # ERB and DF spectral features
-        erb_feat = erb_norm(
-            erb(spec, self._df.erb_widths()), self._alpha
-        )  # [1, S, 32]
+        erb_feat = erb_norm(erb(spec, self._df.erb_widths()), self._alpha)  # [1, S, 32]
         spec_feat = unit_norm(spec[..., :_NB_DF], self._alpha)  # [1, S, 64] cplx
 
         # Convert to ONNX format [B, 1, T, F, 2]
         spec_in = np.stack([spec.real, spec.imag], axis=-1)[np.newaxis]
         feat_erb_in = erb_feat[:, np.newaxis]
-        feat_spec_in = np.stack([spec_feat.real, spec_feat.imag], axis=-1)[
-            np.newaxis
-        ]
+        feat_spec_in = np.stack([spec_feat.real, spec_feat.imag], axis=-1)[np.newaxis]
 
         enhanced = self._session.run(
             None,
@@ -211,9 +205,7 @@ class HushSession:
         enhanced_c = enhanced[0, 0, :, :, 0] + 1j * enhanced[0, 0, :, :, 1]
 
         # ISTFT synthesis (expects 3D: [B, T, F])
-        audio_out = self._df.synthesis(
-            enhanced_c[np.newaxis, :, :], reset=True
-        )
+        audio_out = self._df.synthesis(enhanced_c[np.newaxis, :, :], reset=True)
 
         # Compensate algorithmic delay
         delay = _FFT_SIZE - _HOP_SIZE
