@@ -266,13 +266,17 @@ def erb(spec: np.ndarray, widths: np.ndarray, db: bool = True) -> np.ndarray:
     Matches libdf's ``compute_band_corr``: each ERB band is the
     *mean* of the squared magnitudes of its bins, not the sum.
     """
+    # Squared magnitude. We keep it in float32 to match libdf.
     power = (spec.real * spec.real + spec.imag * spec.imag).astype(np.float32)
+    # Vectorized non-overlapping band sums. ``np.add.reduceat`` with
+    # ``[start_0, start_1, ..., start_n, freq_bins]`` returns the sum
+    # of each band; the final element (a[total:total].sum() = 0) is
+    # dropped. Faster than a per-band .mean() loop or cumsum+diff.
     flat = power.reshape(-1, power.shape[-1])
-    out = np.empty((flat.shape[0], len(widths)), dtype=np.float32)
-    start = 0
-    for b, w in enumerate(widths):
-        out[:, b] = flat[:, start : start + w].mean(axis=1)
-        start += int(w)
+    starts = np.concatenate([[0], np.cumsum(widths)[:-1]])
+    indices = np.concatenate([starts, [flat.shape[-1]]])
+    band_sums = np.add.reduceat(flat, indices[:-1], axis=1)
+    out = band_sums / widths[None, :]
     if db:
         # Libdf: out = 10 * log10(out + 1e-10) — adds the floor to the
         # value, not clip-then-log.

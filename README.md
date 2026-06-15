@@ -124,6 +124,24 @@ The ONNX model bundle is from the public PyTorch checkpoint ([weya-ai/hush](http
 
 Output parity is verified via `scripts/verify_against_pytorch.py`, which compares the per-frame ONNX pipeline output against the original PyTorch model.
 
+## Benchmarking
+
+`scripts/benchmark.py` measures per-frame latency, multi-stream throughput, and a DSP-component breakdown on the host machine. Run it on the actual deployment host to see real numbers (the per-call cost varies ~5-10× between laptop CPUs and server-class x86 / ARM):
+
+```
+python scripts/benchmark.py
+python scripts/benchmark.py --json results.json
+python scripts/benchmark.py --multi-streams 1,4,8,16,32 --multi-frames 1000
+python scripts/benchmark.py --skip-dsp    # single + multi-stream only
+```
+
+The script prints a system-info header (Python, NumPy, ORT versions; CPU count), then three sections:
+1. **Single-stream latency** — full per-frame pipeline (`process_frame`), 5 trials, reports the median in µs/frame and the real-time factor (10 ms / per-frame).
+2. **Multi-stream throughput** — N concurrent sessions advancing in lockstep via a thread pool, reports elapsed time and CPU% of one core. Useful for sizing the agent worker (e.g. "with 16 streams we hit 35% of one core on this CPU").
+3. **DSP component breakdown** — analysis, ERB projection, ERB+DF normalization, and synthesis, in isolation from the three ONNX sub-model inferences. Shows how much of the per-frame cost is the numpy frontend vs the ORT calls.
+
+`--json <path>` writes the same numbers in machine-readable form for tracking regressions across machines.
+
 ---
 
 ## Audio samples
