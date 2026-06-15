@@ -42,10 +42,18 @@ class MockHushSession:
     def __init__(self, model=None, atten_lim_db=None):
         self.gain = 0.5
         self.processed_chunks = []
+        self._prev_tail = None
+        self._prev_output_tail = None
+        self._prev_df_tail = None
 
     def process_chunk(self, audio: np.ndarray) -> np.ndarray:
         self.processed_chunks.append(audio.copy())
         return audio * self.gain
+
+    def reset_state(self):
+        self._prev_tail = None
+        self._prev_output_tail = None
+        self._prev_df_tail = None
 
     def close(self):
         pass
@@ -347,6 +355,52 @@ class TestIntegration:
             assert len(out) == 5120, f"Frame {i} output length mismatch"
             assert np.sqrt(np.mean(out**2)) > 1e-6, f"Frame {i} is silent"
 
+    def test_prev_df_tail_on_second_chunk(self):
+        """Second chunk uses prev_df_tail from first (concat vs pad branch)."""
+        from livekit.plugins.hush._hush_model import HushModel, HushSession
+
+        model = HushModel()
+        session = HushSession(model)
+        rng = np.random.default_rng(42)
+
+        chunk1 = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
+        out1 = session.process_chunk(chunk1)
+        assert len(out1) == 5120
+
+        # Second call hits the prev_df_tail concat branch in _enhance_spectrum
+        chunk2 = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
+        out2 = session.process_chunk(chunk2)
+        assert len(out2) == 5120
+
+    def test_atten_lim_db_effect(self):
+        """atten_lim_db < 100 dB limits suppression compared to unlimited."""
+        from livekit.plugins.hush import HushNoiseSuppressor
+
+        rng = np.random.default_rng(42)
+        samples = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
+        frame = create_audio_frame(samples)
+
+        ns_unlimited = HushNoiseSuppressor(strength=1.0, atten_lim_db=100.0)
+        result_u = ns_unlimited._process(frame)
+        out_u = (
+            np.frombuffer(result_u.data, dtype=np.int16).astype(np.float32) / 32768.0
+        )
+        ns_unlimited._close()
+
+        ns_limited = HushNoiseSuppressor(strength=1.0, atten_lim_db=6.0)
+        result_l = ns_limited._process(frame)
+        out_l = (
+            np.frombuffer(result_l.data, dtype=np.int16).astype(np.float32) / 32768.0
+        )
+        ns_limited._close()
+
+        rms_u = np.sqrt(np.mean(out_u**2))
+        rms_l = np.sqrt(np.mean(out_l**2))
+        assert rms_l > rms_u, (
+            f"Limited (6 dB) output RMS {rms_l:.5f} should exceed "
+            f"unlimited RMS {rms_u:.5f}"
+        )
+
 
 # ------------------------------------------------------------------ #
 # Coverage gap tests                                                    #
@@ -499,6 +553,126 @@ class TestCoverageGaps:
         result = ns._process(frame)
         # Output length must match input length (trim/pad logic exercised)
         assert result.samples_per_channel == 16000
+
+    def test_trim_pad_output_mismatch(self, monkeypatch):
+        """Trim/pad with 44.1kHz — non-integer ratio guarantees a length mismatch."""
+        _patch_module(monkeypatch)
+        import livekit.plugins.hush.noise_suppressor as ns_module
+
+        ns = ns_module.HushNoiseSuppressor(strength=1.0)
+        rng = np.random.default_rng(42)
+        # 44.1 kHz → 16 kHz is a non-integer ratio → resampler length varies
+        samples = rng.uniform(-0.5, 0.5, 4410).astype(np.float32)
+        int16_data = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+        frame = rtc.AudioFrame(
+            data=int16_data.tobytes(),
+            sample_rate=44100,
+            num_channels=1,
+            samples_per_channel=4410,
+        )
+        result = ns._process(frame)
+        # The trim/pad at line 301-306 must match input length exactly
+        assert result.samples_per_channel == 4410, (
+            f"Expected 4410 samples, got {result.samples_per_channel}"
+        )
+
+    def test_resampler_flush_on_rate_change(self, monkeypatch):
+        """Mid-session rate switch triggers resampler flush code path."""
+        _patch_module(monkeypatch)
+        import livekit.plugins.hush.noise_suppressor as ns_module
+
+        ns = ns_module.HushNoiseSuppressor(strength=1.0)
+        rng = np.random.default_rng(42)
+
+        # First frame at 48 kHz — creates resamplers
+        samples_48k = rng.uniform(-0.5, 0.5, 15360).astype(np.float32)
+        int16_data = (np.clip(samples_48k, -1.0, 1.0) * 32767.0).astype(np.int16)
+        frame_48k = rtc.AudioFrame(
+            data=int16_data.tobytes(),
+            sample_rate=48000,
+            num_channels=1,
+            samples_per_channel=15360,
+        )
+        ns._process(frame_48k)
+
+        # Second frame at 16 kHz — flushes existing resamplers, then skips
+        # creating new ones since input is already 16 kHz.
+        samples_16k = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
+        frame_16k = create_audio_frame(samples_16k, sample_rate=16000)
+        result = ns._process(frame_16k)
+        assert result.sample_rate == 16000
+        assert result.samples_per_channel == 5120
+
+    def test_peak_normalization_clipping(self, monkeypatch):
+        """Model output > 1.0 is clipped to [-1.0, 1.0] before int16 conversion."""
+        _patch_module(monkeypatch)
+        import livekit.plugins.hush.noise_suppressor as ns_module
+
+        class ClippingMockSession:
+            def __init__(self, model=None, atten_lim_db=None):
+                pass
+            def process_chunk(self, audio: np.ndarray) -> np.ndarray:
+                return audio * 2.0
+            def close(self):
+                pass
+
+        monkeypatch.setattr(ns_module, "HushSession", ClippingMockSession)
+
+        ns = ns_module.HushNoiseSuppressor(strength=1.0)
+        rng = np.random.default_rng(42)
+        samples = rng.uniform(-0.3, 0.3, 5120).astype(np.float32)
+        frame = create_audio_frame(samples)
+        result = ns._process(frame)
+        out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+        assert np.all(np.abs(out) <= 1.0 + 1e-6), "Output should be clipped to [-1, 1]"
+
+    def test_stereo_different_channels(self, monkeypatch):
+        """Stereo with different L/R content is collapsed to mono via mean."""
+        _patch_module(monkeypatch)
+        import livekit.plugins.hush.noise_suppressor as ns_module
+
+        ns = ns_module.HushNoiseSuppressor(strength=1.0)
+        rng = np.random.default_rng(42)
+        n_per_ch = 640
+        left = rng.uniform(-0.5, 0.5, n_per_ch).astype(np.float32)
+        right = rng.uniform(-0.5, 0.5, n_per_ch).astype(np.float32)
+        interleaved = np.empty(n_per_ch * 2, dtype=np.float32)
+        interleaved[0::2] = left
+        interleaved[1::2] = right
+        int16_data = (np.clip(interleaved, -1.0, 1.0) * 32767.0).astype(np.int16)
+        frame = rtc.AudioFrame(
+            data=int16_data.tobytes(),
+            sample_rate=16000,
+            num_channels=2,
+            samples_per_channel=n_per_ch,
+        )
+        result = ns._process(frame)
+        assert result.num_channels == 2
+        out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+        out = out.reshape(-1, 2)
+        # Both channels should be identical (mono processing + stereo repeat)
+        np.testing.assert_array_almost_equal(out[:, 0], out[:, 1], decimal=4)
+
+    def test_on_stream_info_updated(self, monkeypatch):
+        """_on_stream_info_updated resets session warm-up / crossfade state."""
+        _patch_module(monkeypatch)
+        import livekit.plugins.hush.noise_suppressor as ns_module
+
+        ns = ns_module.HushNoiseSuppressor(strength=1.0)
+        # Seed session state so we can detect a reset
+        ns._session._prev_tail = np.ones((1, 10), dtype=np.float32)
+        ns._session._prev_output_tail = np.ones(160, dtype=np.float32)
+        ns._session._prev_df_tail = np.ones((4, 5, 2), dtype=np.float32)
+
+        ns._on_stream_info_updated(
+            room_name="test_room",
+            participant_identity="test_participant",
+            publication_sid="test_sid",
+        )
+
+        assert ns._session._prev_tail is None
+        assert ns._session._prev_output_tail is None
+        assert ns._session._prev_df_tail is None
 
     @pytest.mark.skipif(
         not _model_available(),
