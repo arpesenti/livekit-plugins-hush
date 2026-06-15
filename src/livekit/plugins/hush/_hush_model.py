@@ -130,6 +130,10 @@ class HushSession:
         # Saved tail of the previous chunk for warm-up overlap
         self._prev_tail = None
 
+        # Saved tail of the previous chunk's DF-filter history for
+        # polynomial-prediction seeding (5-tap filter).
+        self._prev_df_tail = None
+
         # Crossfade: last CROSSFADE_SAMPLES of previous chunk's output
         self._crossfade_samples = _HOP_SIZE  # 160 samples = 10ms
         self._prev_output_tail = None
@@ -240,7 +244,10 @@ class HushSession:
             erb_batch = erb_feat
             sf_batch = sf_feat
 
-        enhanced_batch, _ = self._enhance_spectrum(spec_batch, erb_batch, sf_batch)
+        enhanced_batch, next_df = self._enhance_spectrum(
+            spec_batch, erb_batch, sf_batch, prev_df_tail=self._prev_df_tail,
+        )
+        self._prev_df_tail = next_df
         enhanced_model = enhanced_batch[W:]  # discard warm-up frames
 
         # Save tail for next chunk
@@ -283,6 +290,7 @@ class HushSession:
         """Reset warm-up and crossfade state for a new audio stream."""
         self._prev_tail = None
         self._prev_output_tail = None
+        self._prev_df_tail = None
 
     def close(self):
         self._df = None
@@ -291,3 +299,4 @@ class HushSession:
         self._df_dec_sess = None
         self._prev_tail = None
         self._prev_output_tail = None
+        self._prev_df_tail = None
