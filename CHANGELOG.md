@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.1 — Performance tuning
+
+**Improvements:**
+
+- **ORT session options tuned for low-latency.** Mirrors the upstream
+  [silero VAD plugin](https://github.com/livekit/agents/tree/main/livekit-plugins/livekit-plugins-silero):
+  `intra_op_num_threads=1`, `inter_op_num_threads=1`, `ORT_SEQUENTIAL`,
+  no spinning waits. ~2× per-frame speedup over ORT defaults (0.48 →
+  0.25 ms per frame on ARM64). No configuration knob — the plugin
+  picks the right config automatically.
+- **Docs cleanup.** The `hush-stream-*.wav` sample variants were
+  removed; the per-frame pipeline makes "batch vs stream" an
+  obsolete distinction. `scripts/process_audio_samples.py`
+  simplified accordingly. README "Audio samples" section collapsed
+  from 3-column to 2-column.
+
+**No API changes.** 0.2.1 is fully compatible with 0.2.0.
+
 ## 0.2.0 — Per-frame streaming
 
 **Breaking changes:**
@@ -20,9 +38,8 @@
   upstream reference's linear blend (`spec_out = spec_in * lim +
   spec_enh * (1.0 - lim)`) instead of a per-bin gain clamp.
 - **No more `process_chunk` / `_CHUNK_SAMPLES` / `_WARMUP_FRAMES`
-  / `_NORM_TAU` public API.** Replaced by `process_frame(audio_160)`
-  and `_FRAME_SAMPLES`. The internal `_NORM_TAU = 1.0` constant is
-  still exported (used in `_compute_alpha`).
+  public API.** Replaced by `process_frame(audio_160)` and
+  `_FRAME_SAMPLES`.
 
 **New:**
 

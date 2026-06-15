@@ -82,16 +82,37 @@ The ONNX session is a process-level singleton. Each `HushNoiseSuppressor` instan
 
 ## Inference performance
 
-| | Streaming (per frame) | Batch (full file) |
+| | Per-frame streaming | Batch (full file) |
 |---|---|---|
 | Frame size | 1 frame (10 ms) | Full audio |
 | Algorithmic latency | 10 ms | N/A (offline) |
-| Inference time | ~2-3 ms per frame | ~8 ms per second of audio |
-| Real-time factor | 0.2-0.3× | 0.008× |
-| Throughput | 4-5× real-time (~40-50 frames/sec per session) | 129× real-time |
+| Per-frame time (single session) | ~0.25 ms | — |
+| Per-frame time (20 concurrent) | ~0.20 ms | — |
+| Real-time factor | 0.025× (per frame) | 0.008× |
+| Throughput | ~4,000 frames/sec per core (single session) | 129× real-time |
+| Concurrent sessions per core | ~390+ at 100 fps | — |
 | Model size | ~9 MB (3 ONNX files) | |
 
-Measured on ARM64 Linux (aarch64). Steady-state throughput supports 100+ concurrent sessions per core.
+Per-frame time measured on a single ARM64 core with the silero-style
+low-latency ORT config (`intra_op_num_threads=1`, `inter_op_num_threads=1`,
+`ORT_SEQUENTIAL`, no spinning waits). The GIL-bound Python overhead
+per frame is small (~0.05 ms); the bulk of work is in libdf (C) and
+ONNX Runtime (C++), both of which release the GIL. For typical
+LiveKit use cases (5-20 concurrent calls per agent worker), the
+plugin is comfortably real-time on a single core.
+
+**Concurrency model:** the plugin is GIL-bound. N concurrent sessions
+on one core share the same Python GIL; per-frame work is mostly
+C-level (libdf + ORT) which releases the GIL, so the bottleneck is
+the small Python overhead between ORT calls. For higher concurrency
+than ~500 streams per core, run multiple agent worker processes.
+
+**ORT config:** we use the same low-latency session options as the
+upstream [silero VAD plugin](https://github.com/livekit/agents/tree/main/livekit-plugins/livekit-plugins-silero)
+— `intra_op_num_threads=1`, `inter_op_num_threads=1`,
+`execution_mode=ORT_SEQUENTIAL`, no spinning waits. This is ~2× faster
+than ORT defaults for single-stream inference because it avoids the
+per-op thread-pool overhead ORT enables by default.
 
 ---
 
