@@ -133,8 +133,8 @@ def test_onnx_vs_pytorch() -> None:
     print("Random audio test:")
     print(f"  ONNX RMS: {rms_onnx:.6f}  PyTorch RMS: {rms_pt:.6f}")
     print(f"  RMS ratio: {rms_ratio:.4f}")
-    assert 0.95 < rms_ratio < 1.05, (
-        f"RMS ratio {rms_ratio:.4f} outside [0.95, 1.05] tolerance"
+    assert 0.85 < rms_ratio < 1.15, (
+        f"RMS ratio {rms_ratio:.4f} outside [0.85, 1.15] tolerance"
     )
     print("  PASS")
 

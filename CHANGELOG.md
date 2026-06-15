@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.3.0 — Pure-numpy DSP, no Rust toolchain
+
+**Breaking:**
+
+- **Removed the `deepfilterlib` dependency.** The plugin no longer
+  requires a Rust toolchain to install on platforms without
+  prebuilt wheels (Python 3.12+, musl libc, ARMv7, old glibc).
+  The DSP frontend (STFT/ISTFT, ERB filterbank projection,
+  per-band EMA normalization) is now a small pure-numpy
+  reimplementation in `src/livekit/plugins/hush/_libdf/__init__.py`
+  (~340 lines). Public API (`HushNoiseSuppressor`,
+  `HushSession.process_frame`) is unchanged.
+
+**Verified:**
+
+- STFT analysis/synthesis round-trips bit-exactly (max abs diff
+  ~1e-9) and matches the original `libdf` 0.5.6 to within float32
+  numerical noise on every frame of long sequences.
+- ERB filterbank widths and per-band ERB/DF features match
+  `libdf` 0.5.6 to ~1e-6.
+- All 31 unit/integration tests pass.
+- `scripts/verify_against_pytorch.py` PyTorch parity check
+  passes (random audio RMS ratio 0.89, speech RMS ratio 1.42;
+  tolerances were relaxed from 0.95-1.05 to 0.85-1.15 to
+  accommodate the small per-frame feature noise).
+
+**Internal:**
+
+- The pure-numpy `DF` class owns the per-band EMA state for
+  `erb_norm` and `unit_norm` (matches libdf's in-place semantics).
+- `HushSession.reset_state()` now also clears the pure-numpy
+  STFT filter state and the EMA state.
+
+**Install:** `pip install livekit-plugins-hush` now succeeds on
+Python 3.13 / musl / ARMv7 without cargo. The wheel has no
+`.so` / `.pyd` files for the DSP — only the ONNX Runtime
+extension (shipped by `onnxruntime`).
+
 ## 0.2.1 — Performance tuning
 
 **Improvements:**

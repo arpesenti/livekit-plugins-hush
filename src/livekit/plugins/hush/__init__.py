@@ -12,7 +12,7 @@ class HushPlugin(Plugin):
     def __init__(self):
         super().__init__(
             title="Hush",
-            version="0.2.1",
+            version="0.3.0",
             package="livekit-plugins-hush",
             logger=logger,
         )

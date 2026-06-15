@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "livekit-plugins-hush"
-version = "0.2.1"
+version = "0.3.0"
 description = "Hush noise suppression plugin for LiveKit Agents"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -27,7 +27,6 @@ dependencies = [
     "livekit-agents>=1.4.4",
     "numpy>=1.26.0",
     "onnxruntime>=1.17.0",
-    "deepfilterlib>=0.5.4",
 ]
 
 [project.urls]

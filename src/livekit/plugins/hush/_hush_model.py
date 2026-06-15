@@ -22,7 +22,8 @@ import threading
 
 import numpy as np
 import onnxruntime as ort
-from libdf import DF, erb, erb_norm, unit_norm
+
+from ._libdf import DF, erb, erb_norm, unit_norm
 
 logger = logging.getLogger(__name__)
 
@@ -288,10 +289,17 @@ class HushSession:
         # spec_new: (1, 1, 161) complex64
 
         # ---- Feature extraction (per frame) ----------------------------
-        erb_feat = erb_norm(
-            erb(spec_new, self._df.erb_widths()), self._alpha
+        # The DF class owns the EMA state for both normalizations
+        # (matches libdf's in-place semantics). On a fresh session
+        # the state is None and gets initialized to the libdf defaults.
+        erb_feat, self._df._erb_norm_state = erb_norm(
+            erb(spec_new, self._df.erb_widths()),
+            self._alpha,
+            self._df._erb_norm_state,
         )  # (1, 1, 32)
-        sf_feat = unit_norm(spec_new[..., :_NB_DF], self._alpha)  # (1, 1, 64) complex
+        sf_feat, self._df._unit_norm_state = unit_norm(
+            spec_new[..., :_NB_DF].copy(), self._alpha, self._df._unit_norm_state
+        )  # (1, 1, 64) complex
 
         # ---- Encoder ----------------------------------------------------
         # Single-frame input. The GRU hidden state carries context.

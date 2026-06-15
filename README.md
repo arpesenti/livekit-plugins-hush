@@ -2,7 +2,7 @@
 
 [LiveKit](https://livekit.io) noise suppression plugin using the [Hush](https://github.com/pulp-vision/Hush) speech enhancement model. Self-hosted, in-process, no cloud API.
 
-Hush is built on [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) with an auxiliary separation head for background speaker suppression. Inference uses [DeepFilterLib](https://github.com/Rikorose/DeepFilterNet) for feature extraction and [ONNX Runtime](https://onnxruntime.ai) for the neural network. No PyTorch dependency at runtime.
+Hush is built on [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) with an auxiliary separation head for background speaker suppression. Inference uses a pure-numpy DSP frontend for STFT/ERB feature extraction and [ONNX Runtime](https://onnxruntime.ai) for the neural network. No PyTorch, no Rust toolchain, no prebuilt mystery binaries.
 
 ---
 
@@ -12,7 +12,7 @@ Hush is built on [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) wit
 pip install livekit-plugins-hush
 ```
 
-Dependencies: `livekit >= 1.0.25`, `livekit-agents >= 1.4.4`, `numpy >= 1.26.0`, `onnxruntime >= 1.17.0`, `deepfilterlib >= 0.5.4`.
+Dependencies: `livekit >= 1.0.25`, `livekit-agents >= 1.4.4`, `numpy >= 1.26.0`, `onnxruntime >= 1.17.0`.
 
 ---
 
@@ -51,7 +51,7 @@ The model operates at 16 kHz with 10 ms frames (160 samples, 320-sample FFT). Pr
 
 The three ONNX sub-models (`enc`, `erb_dec`, `df_dec`) have been re-exported to expose the encoder, ERB decoder, and DF decoder GRU hidden states as I/O. `HushSession` holds those three states (and a 4-frame DF filter history) and threads them through every call, so the GRU has continuous memory across the entire session — same mechanism as the C library.
 
-The libdf analysis/synthesis runs in streaming mode (`reset=False`), so its filter state is carried across frames. The first frame's output is the STFT warmup (effectively zero); algorithmic latency is **1 frame (10 ms)** for the STFT lookahead, on top of GRU-state propagation which is fully causal.
+The pure-numpy STFT runs in streaming mode (`reset=False`), so its analysis/synthesis filter state is carried across frames. The first frame's output is the STFT warmup (effectively zero); algorithmic latency is **1 frame (10 ms)** for the STFT lookahead, on top of GRU-state propagation which is fully causal.
 
 ### Signal flow
 
@@ -59,12 +59,12 @@ The libdf analysis/synthesis runs in streaming mode (`reset=False`), so its filt
 LiveKit AudioFrame (any rate, any channels)
   → resample to 16 kHz mono
   → buffer 10 ms (160 samples) per frame
-  → DeepFilterLib streaming STFT (1 frame out, state carried)
+  → Pure-numpy streaming STFT (1 frame out, state carried)
   → ERB features + DF spectral features
   → ONNX: encoder → ERB decoder + DF decoder (with continuous GRU state)
   → apply ERB mask + DF complex filter to spectrum
   → apply atten_lim_db linear blend (matches upstream reference)
-  → DeepFilterLib streaming ISTFT
+  → Pure-numpy streaming ISTFT
   → wet/dry blend
   → upsample, restore channels
 → AudioFrame
@@ -95,16 +95,18 @@ The ONNX session is a process-level singleton. Each `HushNoiseSuppressor` instan
 
 Per-frame time measured on a single ARM64 core with the silero-style
 low-latency ORT config (`intra_op_num_threads=1`, `inter_op_num_threads=1`,
-`ORT_SEQUENTIAL`, no spinning waits). The GIL-bound Python overhead
-per frame is small (~0.05 ms); the bulk of work is in libdf (C) and
-ONNX Runtime (C++), both of which release the GIL. For typical
-LiveKit use cases (5-20 concurrent calls per agent worker), the
-plugin is comfortably real-time on a single core.
+`ORT_SEQUENTIAL`, no spinning waits). End-to-end `process_frame` takes
+~0.35 ms per 10 ms frame (~28× real-time headroom on a single core).
+Of that, ~0.085 ms is the pure-numpy DSP (STFT/ISTFT + ERB projection
++ per-band EMA) and ~0.27 ms is the three ONNX sub-model inferences
+(encoder + ERB decoder + DF decoder). For typical LiveKit use cases
+(5-20 concurrent calls per agent worker), the plugin is comfortably
+real-time on a single core.
 
 **Concurrency model:** the plugin is GIL-bound. N concurrent sessions
 on one core share the same Python GIL; per-frame work is mostly
-C-level (libdf + ORT) which releases the GIL, so the bottleneck is
-the small Python overhead between ORT calls. For higher concurrency
+C-level (ORT) which releases the GIL, plus a small amount of pure-numpy
+DSP (STFT + ERB projection + per-band EMA). For higher concurrency
 than ~500 streams per core, run multiple agent worker processes.
 
 **ORT config:** we use the same low-latency session options as the
