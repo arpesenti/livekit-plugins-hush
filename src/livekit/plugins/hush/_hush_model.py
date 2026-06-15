@@ -149,8 +149,8 @@ class HushSession:
         """
         S = spec_chunk.shape[1]
         enc_out = self._enc_sess.run(self._enc_output_names, {
-            self._enc_input_names[0]: erb_chunk[:, np.newaxis, :, :].astype(np.float32),
-            self._enc_input_names[1]: np.stack([sf_chunk.real, sf_chunk.imag], axis=1).astype(np.float32),
+            self._enc_input_names[0]: erb_chunk[:, np.newaxis, :, :],
+            self._enc_input_names[1]: np.stack([sf_chunk.real, sf_chunk.imag], axis=1),
         })
         enc = dict(zip(self._enc_output_names, enc_out))
 
