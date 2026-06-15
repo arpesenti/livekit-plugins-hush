@@ -199,10 +199,9 @@ def test_onnx_vs_pytorch() -> None:
     print("  PASS")
 
     # --- Compare raw spectrum output ---
-    enhanced_np = df_speech.analysis(
+    df_speech.analysis(
         np.pad(enhanced_speech[np.newaxis, :], ((0, 0), (0, 320))), reset=True
     )
-    word = os.path.basename(speech_path)
     print(
         f"\nPASS: ONNX output matches PyTorch output "
         f"(random RMS ratio={rms_ratio:.4f}, speech RMS ratio={rms_ratio_speech:.4f})"
