@@ -179,7 +179,7 @@ class HushSession:
         re = c[..., 0] * w[..., 0] - c[..., 1] * w[..., 1]
         im = c[..., 1] * w[..., 0] + c[..., 0] * w[..., 1]
 
-        enhanced = spec_masked.copy()
+        enhanced = spec_masked
         enhanced[:, :_NB_DF] = re.sum(axis=0) + 1j * im.sum(axis=0)
 
         # Attenuation limit — clamp the per-bin gain so the mask never
