@@ -258,9 +258,7 @@ class HushSession:
         if self._prev_tail is None:
             self._prev_tail = spec_model
         else:
-            self._prev_tail = np.concatenate(
-                [self._prev_tail, spec_model], axis=1
-            )[:, -tail_len * 2:]  # keep up to 2x for safety
+            self._prev_tail = spec_model[:, -tail_len:]
 
         # Build enhanced for synthesis.
         # Always reset=True per chunk — each chunk is STFT-independent.
