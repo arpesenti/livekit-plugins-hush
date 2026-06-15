@@ -103,6 +103,15 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
     def enabled(self, value: bool) -> None:
         self._enabled = value
 
+    def _on_stream_info_updated(
+        self,
+        *,
+        room_name: str,
+        participant_identity: str,
+        publication_sid: str,
+    ) -> None:
+        self._session.reset_state()
+
     def _process(self, frame: rtc.AudioFrame) -> rtc.AudioFrame:
         if not self._enabled:
             return frame
