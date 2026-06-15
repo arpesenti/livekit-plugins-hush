@@ -40,3 +40,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "livekit.plugins.hush" = ["models/*.onnx", "models/*.ini"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.0",
+]

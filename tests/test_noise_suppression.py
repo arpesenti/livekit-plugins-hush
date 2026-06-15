@@ -39,7 +39,7 @@ def create_audio_frame(
 class MockHushSession:
     """Mock session that applies a simple gain reduction."""
 
-    def __init__(self, model=None):
+    def __init__(self, model=None, atten_lim_db=None):
         self.gain = 0.5
         self.processed_chunks = []
 

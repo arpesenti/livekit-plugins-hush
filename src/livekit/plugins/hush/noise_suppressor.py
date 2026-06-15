@@ -37,6 +37,59 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
 
 
+class _QueueBuffer:
+    """Preallocated linear FIFO buffer for 1-D float32 arrays.
+
+    Eliminates per-frame ``np.concatenate`` allocations on the hot path.
+    Compacted only when growth is necessary (amortized O(1)).
+    """
+
+    def __init__(self, initial_capacity: int = 8192):
+        self._buf = np.empty(initial_capacity, dtype=np.float32)
+        self._start = 0
+        self._end = 0
+
+    def __len__(self) -> int:
+        return self._end - self._start
+
+    def _compact(self) -> None:
+        n = len(self)
+        if n > 0:
+            self._buf[:n] = self._buf[self._start : self._end]
+        self._start = 0
+        self._end = n
+
+    def _ensure(self, extra: int) -> None:
+        needed = self._end + extra
+        if needed > len(self._buf):
+            self._compact()
+            needed = self._end + extra
+            if needed > len(self._buf):
+                new_cap = max(len(self._buf) * 2, needed)
+                new_buf = np.empty(new_cap, dtype=np.float32)
+                new_buf[: self._end] = self._buf[: self._end]
+                self._buf = new_buf
+
+    def append(self, arr: np.ndarray) -> None:
+        n = len(arr)
+        if n == 0:
+            return
+        self._ensure(n)
+        self._buf[self._end : self._end + n] = arr
+        self._end += n
+
+    def peek(self, n: int) -> np.ndarray:
+        n = min(n, len(self))
+        return self._buf[self._start : self._start + n]
+
+    def popleft(self, n: int) -> None:
+        self._start += min(n, len(self))
+
+    def clear(self) -> None:
+        self._start = 0
+        self._end = 0
+
+
 class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
     """In-process Hush noise suppressor for self-hosted LiveKit.
 
@@ -75,9 +128,9 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         self._session: Optional[HushSession] = HushSession(shared_model, atten_lim_db)
 
         # Input/output queues for handling arbitrary LiveKit frame sizes
-        self._input_queue = np.zeros(0, dtype=np.float32)
-        self._output_queue = np.zeros(0, dtype=np.float32)
-        self._dry_queue = np.zeros(0, dtype=np.float32)
+        self._input_queue: _QueueBuffer = _QueueBuffer()
+        self._output_queue: _QueueBuffer = _QueueBuffer()
+        self._dry_queue: _QueueBuffer = _QueueBuffer()
 
         self._strength = max(0.0, min(1.0, strength))
         self._debug_logging = debug_logging
@@ -124,7 +177,7 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
                 flushed = self._downsampler.flush()
                 for f in flushed:
                     s = np.frombuffer(f.data, dtype=np.int16).astype(np.float32) / 32768.0
-                    self._input_queue = np.concatenate([self._input_queue, s])
+                    self._input_queue.append(s)
                 del self._downsampler
                 self._downsampler = None
             if self._upsampler is not None:
@@ -177,18 +230,18 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
             ]
         )
 
-        self._input_queue = np.concatenate([self._input_queue, samples_16k])
+        self._input_queue.append(samples_16k)
         if self._strength < 1.0:
-            self._dry_queue = np.concatenate([self._dry_queue, samples_16k])
+            self._dry_queue.append(samples_16k)
 
         # Process in 32-frame chunks (5120 samples)
         while len(self._input_queue) >= _CHUNK_SAMPLES:
-            chunk_in = self._input_queue[:_CHUNK_SAMPLES]
-            self._input_queue = self._input_queue[_CHUNK_SAMPLES:]
+            chunk_in = self._input_queue.peek(_CHUNK_SAMPLES)
+            self._input_queue.popleft(_CHUNK_SAMPLES)
 
             chunk_out = self._session.process_chunk(chunk_in)
 
-            self._output_queue = np.concatenate([self._output_queue, chunk_out])
+            self._output_queue.append(chunk_out)
 
             if self._debug_logging:
                 if self._debug_chunk_count % 10 == 0:
@@ -211,13 +264,13 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
                 "Hush started processing — first 320 ms of session was unmodified pre-roll"
             )
 
-        out_16k = self._output_queue[:n_16k]
-        self._output_queue = self._output_queue[n_16k:]
+        out_16k = self._output_queue.peek(n_16k)
+        self._output_queue.popleft(n_16k)
 
         # Wet/dry blend
         if self._strength < 1.0:
-            dry_16k = self._dry_queue[:n_16k]
-            self._dry_queue = self._dry_queue[n_16k:]
+            dry_16k = self._dry_queue.peek(n_16k)
+            self._dry_queue.popleft(n_16k)
             out_16k = self._strength * out_16k + (1.0 - self._strength) * dry_16k
 
         # Build 16 kHz AudioFrame and upsample back
