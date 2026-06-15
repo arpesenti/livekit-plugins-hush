@@ -91,13 +91,17 @@ class HushModel:
         self.df_dec_sess = ort.InferenceSession(df_dec_path, providers=["CPUExecutionProvider"])
         self.erb_inv_fb = _build_erb_inv_fb()
 
-        self._enc_output_names = [o.name for o in self.enc_sess.get_outputs()]
+        self._enc_input_names = [i.name for i in self.enc_sess.get_inputs()]
+        self._enc_output_names = [o.name for o in self.enc_sess.get_outputs() if o.name != "lsnr"]
 
         # Warm-up
         S = _CHUNK_FRAMES
         dummy_erb = np.zeros((1, 1, S, _NB_ERB), dtype=np.float32)
         dummy_spec = np.zeros((1, 2, S, _NB_DF), dtype=np.float32)
-        enc_out = self.enc_sess.run(None, {"feat_erb": dummy_erb, "feat_spec": dummy_spec})
+        enc_out = self.enc_sess.run(self._enc_output_names, {
+            self._enc_input_names[0]: dummy_erb,
+            self._enc_input_names[1]: dummy_spec,
+        })
         enc_dict = dict(zip(self._enc_output_names, enc_out))
         self.erb_dec_sess.run(None, {
             "emb": enc_dict["emb"], "e3": enc_dict["e3"], "e2": enc_dict["e2"],
@@ -144,9 +148,9 @@ class HushSession:
         Returns (enhanced_spectrum, df_tail_for_next_chunk).
         """
         S = spec_chunk.shape[1]
-        enc_out = self._enc_sess.run(None, {
-            "feat_erb": erb_chunk[:, np.newaxis, :, :].astype(np.float32),
-            "feat_spec": np.stack([sf_chunk.real, sf_chunk.imag], axis=1).astype(np.float32),
+        enc_out = self._enc_sess.run(self._enc_output_names, {
+            self._enc_input_names[0]: erb_chunk[:, np.newaxis, :, :].astype(np.float32),
+            self._enc_input_names[1]: np.stack([sf_chunk.real, sf_chunk.imag], axis=1).astype(np.float32),
         })
         enc = dict(zip(self._enc_output_names, enc_out))
 
