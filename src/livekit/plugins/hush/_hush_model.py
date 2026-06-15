@@ -47,9 +47,8 @@ def _build_erb_inv_fb():
     if widths.sum() != n_freqs:
         raise RuntimeError(f"libdf ERB widths sum to {widths.sum()}, expected {n_freqs}")
     b_pts = np.cumsum(np.concatenate([[0], widths])).astype(int)[:-1]
-    fb = np.zeros((n_freqs, _NB_ERB), dtype=np.float32)
-    for i, (b, w) in enumerate(zip(b_pts.tolist(), widths.tolist())):
-        fb[b : b + w, i] = 1.0
+    freqs = np.arange(n_freqs)
+    fb = ((freqs[:, None] >= b_pts) & (freqs[:, None] < b_pts + widths)).astype(np.float32)
     return fb.T.copy()
 
 
