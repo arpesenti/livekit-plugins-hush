@@ -8,7 +8,9 @@ eliminating rhythmic clicking at 32-frame boundaries.
 Feature extraction uses the ``libdf`` C library. No PyTorch required.
 """
 
-import logging, os, threading
+import logging
+import os
+import threading
 import numpy as np
 import onnxruntime as ort
 from libdf import DF, erb, erb_norm, unit_norm

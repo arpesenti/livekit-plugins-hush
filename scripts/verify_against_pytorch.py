@@ -120,7 +120,7 @@ def test_onnx_vs_pytorch() -> None:
     rms_pt = float(np.sqrt(np.mean(audio_pt**2)))
     rms_ratio = rms_onnx / rms_pt if rms_pt > 0 else 0.0
 
-    print(f"Random audio test:")
+    print("Random audio test:")
     print(f"  ONNX RMS: {rms_onnx:.6f}  PyTorch RMS: {rms_pt:.6f}")
     print(f"  RMS ratio: {rms_ratio:.4f}")
     assert 0.95 < rms_ratio < 1.05, (

@@ -5,7 +5,9 @@ Generates two denoised variants:
   hush-stream-{name}.wav  — streaming mode (HushSession.process_chunk)
 """
 
-import sys, os, wave
+import sys
+import os
+import wave
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

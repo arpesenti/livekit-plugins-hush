@@ -507,7 +507,8 @@ class TestCoverageGaps:
     def test_clean_speech_preservation(self):
         """Clean speech should pass through with minimal distortion."""
         from livekit.plugins.hush._hush_model import HushModel, HushSession
-        import wave, os
+        import wave
+        import os
 
         # Load clean speech sample
         speech_path = os.path.join(
