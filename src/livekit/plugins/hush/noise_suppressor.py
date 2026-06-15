@@ -82,6 +82,7 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         self._strength = max(0.0, min(1.0, strength))
         self._debug_logging = debug_logging
         self._debug_chunk_count = 0
+        self._first_processed_frame = True
 
         # Resamplers — created lazily on the first frame
         self._downsampler: rtc.AudioResampler | None = None
@@ -197,6 +198,12 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         n_16k = len(samples_16k)
         if len(self._output_queue) < n_16k:
             return frame  # filling up during startup latency
+
+        if self._first_processed_frame:
+            self._first_processed_frame = False
+            logger.debug(
+                "Hush started processing — first 320 ms of session was unmodified pre-roll"
+            )
 
         out_16k = self._output_queue[:n_16k]
         self._output_queue = self._output_queue[n_16k:]

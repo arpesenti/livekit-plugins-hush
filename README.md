@@ -49,6 +49,8 @@ hush.noise_suppression(
 
 The model operates at 16 kHz with 10 ms frames (160 samples, 320-sample FFT). Processing is chunked: 32 frames (320 ms) are accumulated and processed together to provide the GRU layers with temporal context. The first chunk incurs 320 ms latency; subsequent chunks keep pace with the input stream.
 
+**Important:** During the first 320 ms, while the internal buffer fills, the output is the unprocessed input. No noise suppression is applied to the pre-roll segment. Callers should drop or flag this segment if unprocessed audio is unacceptable.
+
 ### Signal flow
 
 ```
