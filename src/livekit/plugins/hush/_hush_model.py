@@ -174,6 +174,17 @@ class HushSession:
 
         enhanced = spec_masked.copy()
         enhanced[:, :_NB_DF] = re.sum(axis=0) + 1j * im.sum(axis=0)
+
+        # Attenuation limit — clamp the per-bin gain so the mask never
+        # suppresses below atten_lim_db (re-applied after DF post-filter
+        # since the DF output may differ from the raw ERB mask).
+        if self._atten_lim_db < 100.0:
+            min_gain = 10.0 ** (-self._atten_lim_db / 20.0)
+            gain = np.abs(enhanced) / (np.abs(spec_chunk[0]) + 1e-10)
+            gain_limited = np.maximum(gain, min_gain)
+            ratio = gain_limited / (gain + 1e-10)
+            enhanced = enhanced * ratio
+
         return enhanced, next_df
 
     def process_chunk(self, audio):
