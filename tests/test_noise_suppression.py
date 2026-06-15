@@ -8,6 +8,7 @@ Run: python -m pytest tests/ -v
 import numpy as np
 import pytest
 from livekit import rtc
+from livekit.plugins.hush.noise_suppressor import _QueueBuffer
 
 
 # ------------------------------------------------------------------ #
@@ -62,7 +63,7 @@ class MockHushSession:
 class MockHushModel:
     """Mock shared model."""
 
-    def __init__(self, model_path=None, atten_lim_db=100.0):
+    def __init__(self, model_path=None):
         self.session = object()
 
 
@@ -92,6 +93,62 @@ def mock_suppressor(monkeypatch):
 # ------------------------------------------------------------------ #
 # Frame processing tests                                                #
 # ------------------------------------------------------------------ #
+
+
+class TestQueueBuffer:
+    """Tests for _QueueBuffer (preallocated linear FIFO buffer)."""
+
+    def test_basic_append_peek_popleft(self):
+        buf = _QueueBuffer(initial_capacity=16)
+        assert len(buf) == 0
+
+        buf.append(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+        assert len(buf) == 3
+
+        view = buf.peek(2)
+        np.testing.assert_array_equal(view, [1.0, 2.0])
+
+        buf.popleft(2)
+        assert len(buf) == 1
+
+        view = buf.peek(10)
+        np.testing.assert_array_equal(view, [3.0])
+
+        buf.popleft(1)
+        assert len(buf) == 0
+        assert buf.peek(5).shape == (0,)
+
+    def test_growth_via_realloc(self):
+        buf = _QueueBuffer(initial_capacity=4)
+        arr = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        buf.append(arr)
+        buf.append(arr)
+        assert len(buf) == 6
+        expected = np.array([1.0, 2.0, 3.0, 1.0, 2.0, 3.0], dtype=np.float32)
+        np.testing.assert_array_equal(buf.peek(10), expected)
+
+    def test_popleft_more_than_available_is_safe(self):
+        buf = _QueueBuffer(initial_capacity=16)
+        buf.append(np.array([1.0, 2.0], dtype=np.float32))
+        buf.popleft(100)
+        assert len(buf) == 0
+        buf.append(np.array([42.0], dtype=np.float32))
+        np.testing.assert_array_equal(buf.peek(1), [42.0])
+
+    def test_peek_returns_view(self):
+        buf = _QueueBuffer(initial_capacity=16)
+        buf.append(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+
+        view = buf.peek(2)
+        view[0] = 99.0
+
+        np.testing.assert_array_equal(buf.peek(3), [99.0, 2.0, 3.0])
+
+        buf.clear()
+        buf.append(np.array([10.0, 20.0], dtype=np.float32))
+        view2 = buf.peek(2)
+        view2[1] = 200.0
+        np.testing.assert_array_equal(buf.peek(2), [10.0, 200.0])
 
 
 class TestFrameProcessing:

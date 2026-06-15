@@ -39,6 +39,13 @@ def noise_suppression(
     debug_logging : bool
         Log diagnostics every 10 chunks at DEBUG level.
     """
+    if atten_lim_db < 0:
+        logger.warning(
+            "atten_lim_db=%g is negative; clamping to 0 (no attenuation limit). "
+            "Negative values boost gain instead of limiting attenuation.",
+            atten_lim_db,
+        )
+        atten_lim_db = 0.0
     return HushNoiseSuppressor(
         model_path=model_path,
         atten_lim_db=atten_lim_db,

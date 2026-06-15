@@ -149,6 +149,13 @@ class HushSession:
     """Per-stream denoising session with overlapping-chunk GRU context."""
 
     def __init__(self, model, atten_lim_db=100.0):
+        if atten_lim_db < 0:
+            logger.warning(
+                "atten_lim_db=%g is negative; clamping to 0 (no attenuation limit). "
+                "Negative values boost gain instead of limiting attenuation.",
+                atten_lim_db,
+            )
+            atten_lim_db = 0.0
         self._enc_sess = model.enc_sess
         self._erb_dec_sess = model.erb_dec_sess
         self._df_dec_sess = model.df_dec_sess
@@ -157,6 +164,8 @@ class HushSession:
         self._enc_out_idx = model._enc_out_idx
         self._erb_inv_fb = model.erb_inv_fb
         self._atten_lim_db = atten_lim_db
+        self._apply_atten_lim = atten_lim_db < 100.0
+        self._min_gain = 10.0 ** (-atten_lim_db / 20.0) if self._apply_atten_lim else 0.0
 
         self._df = DF(
             sr=_SAMPLE_RATE,
@@ -237,10 +246,9 @@ class HushSession:
         # Attenuation limit — clamp the per-bin gain so the mask never
         # suppresses below atten_lim_db (re-applied after DF post-filter
         # since the DF output may differ from the raw ERB mask).
-        if self._atten_lim_db < 100.0:
-            min_gain = 10.0 ** (-self._atten_lim_db / 20.0)
+        if self._apply_atten_lim:
             gain = np.abs(enhanced) / (np.abs(spec_chunk[0]) + 1e-10)
-            gain_limited = np.maximum(gain, min_gain)
+            gain_limited = np.maximum(gain, self._min_gain)
             ratio = gain_limited / (gain + 1e-10)
             enhanced = enhanced * ratio
 

@@ -49,7 +49,7 @@ hush.noise_suppression(
 
 The model operates at 16 kHz with 10 ms frames (160 samples, 320-sample FFT). Processing is chunked: 32 frames (320 ms) are accumulated and processed together to provide the GRU layers with temporal context. The first chunk incurs 320 ms latency; subsequent chunks keep pace with the input stream.
 
-To eliminate boundary clicks between chunks, each chunk (except the first) prepends 12 frames (120 ms) of audio from the previous chunk's tail as warm-up context for the GRU layers; the warm-up output is discarded. A 10 ms linear crossfade is applied at each chunk boundary to smooth STFT reconstruction artifacts.
+To eliminate boundary clicks between chunks, each chunk (except the first) prepends 12 frames (120 ms) of audio from the previous chunk's tail as warm-up context for the GRU layers; the warm-up output is discarded. A 10 ms equal-power crossfade is applied at each chunk boundary to smooth STFT reconstruction artifacts.
 
 **Important:** During the first 320 ms, while the internal buffer fills, the output is the unprocessed input. No noise suppression is applied to the pre-roll segment. Callers should drop or flag this segment if unprocessed audio is unacceptable.
 
@@ -64,7 +64,7 @@ LiveKit AudioFrame (any rate, any channels)
   → ONNX: encoder → ERB decoder + DF decoder → enhanced spectrum
   → discard warm-up frames
   → DeepFilterLib: ISTFT
-  → 10 ms linear crossfade with previous chunk's output tail
+  → 10 ms equal-power crossfade with previous chunk's output tail
   → wet/dry blend
   → upsample, restore channels
 → AudioFrame

@@ -93,24 +93,7 @@ class _QueueBuffer:
 class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
     """In-process Hush noise suppressor for self-hosted LiveKit.
 
-    Pass to ``AudioInputOptions(noise_cancellation=hush.noise_suppression())``.
-    Each instance is independent — create one per call session. The ONNX
-    model is shared across instances within the same process.
-
-    The model processes audio in fixed 32-frame (320ms) chunks for GRU
-    context. Audio is accumulated until 5120 samples (32 × 160) are
-    available, then processed as a batch. First-chunk latency is 320ms.
-
-    Parameters
-    ----------
-    model_path : str, optional
-        Path to the directory containing enc.onnx, erb_dec.onnx, df_dec.onnx.
-    atten_lim_db : float
-        Maximum attenuation in dB (default 100.0 = unlimited).
-    strength : float
-        Wet/dry blend factor. 0.0 = bypass, 1.0 = full suppression.
-    debug_logging : bool
-        Log per-chunk diagnostics every 10 chunks at DEBUG level.
+    See ``noise_suppression()`` in ``__init__.py`` for parameter documentation.
     """
 
     def __init__(
@@ -120,6 +103,13 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         strength: float = 0.5,
         debug_logging: bool = False,
     ) -> None:
+        if atten_lim_db < 0:
+            logger.warning(
+                "atten_lim_db=%g is negative; clamping to 0 (no attenuation limit). "
+                "Negative values boost gain instead of limiting attenuation.",
+                atten_lim_db,
+            )
+            atten_lim_db = 0.0
         if model_path is None:
             model_path = _DEFAULT_MODEL_DIR
 
