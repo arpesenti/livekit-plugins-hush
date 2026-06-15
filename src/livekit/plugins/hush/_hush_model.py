@@ -61,18 +61,18 @@ _shared_model = None
 _shared_model_lock = threading.Lock()
 
 
-def _get_shared_model(model_path=None, atten_lim_db=100.0):
+def _get_shared_model(model_path=None):
     global _shared_model
     with _shared_model_lock:
         if _shared_model is None:
-            _shared_model = HushModel(model_path, atten_lim_db)
+            _shared_model = HushModel(model_path)
         return _shared_model
 
 
 class HushModel:
     """Shared ONNX model sessions — loaded once per worker process."""
 
-    def __init__(self, model_path=None, atten_lim_db=100.0):
+    def __init__(self, model_path=None):
         model_dir = model_path or _DEFAULT_MODEL_DIR
 
         enc_path = os.path.join(model_dir, "enc.onnx")
@@ -90,7 +90,6 @@ class HushModel:
         self.erb_dec_sess = ort.InferenceSession(erb_dec_path, providers=["CPUExecutionProvider"])
         self.df_dec_sess = ort.InferenceSession(df_dec_path, providers=["CPUExecutionProvider"])
         self.erb_inv_fb = _build_erb_inv_fb()
-        self._atten_lim_db = atten_lim_db
 
         self._enc_output_names = [o.name for o in self.enc_sess.get_outputs()]
 
@@ -115,13 +114,13 @@ class HushModel:
 class HushSession:
     """Per-stream denoising session with overlapping-chunk GRU context."""
 
-    def __init__(self, model):
+    def __init__(self, model, atten_lim_db=100.0):
         self._enc_sess = model.enc_sess
         self._erb_dec_sess = model.erb_dec_sess
         self._df_dec_sess = model.df_dec_sess
         self._enc_output_names = model._enc_output_names
         self._erb_inv_fb = model.erb_inv_fb
-        self._atten_lim_db = model._atten_lim_db
+        self._atten_lim_db = atten_lim_db
 
         self._df = DF(sr=_SAMPLE_RATE, fft_size=_FFT_SIZE, hop_size=_HOP_SIZE,
                       nb_bands=_NB_ERB, min_nb_erb_freqs=2)

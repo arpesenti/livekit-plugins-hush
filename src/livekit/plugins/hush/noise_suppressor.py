@@ -71,8 +71,8 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
             model_path = _DEFAULT_MODEL_DIR
 
         # Shared ONNX model (one per process, loaded lazily on first use)
-        shared_model = _get_shared_model(model_path, atten_lim_db)
-        self._session: Optional[HushSession] = HushSession(shared_model)
+        shared_model = _get_shared_model(model_path)
+        self._session: Optional[HushSession] = HushSession(shared_model, atten_lim_db)
 
         # Input/output queues for handling arbitrary LiveKit frame sizes
         self._input_queue = np.zeros(0, dtype=np.float32)
