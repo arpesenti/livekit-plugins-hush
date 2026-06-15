@@ -9,7 +9,6 @@ Feature extraction uses the ``libdf`` C library. No PyTorch required.
 """
 
 import logging, os, threading
-from typing import Optional
 import numpy as np
 import onnxruntime as ort
 from libdf import DF, erb, erb_norm, unit_norm
@@ -225,7 +224,6 @@ class HushSession:
 
         spec = self._df.analysis(audio_padded, reset=True)
         spec_model = spec[:, :S]
-        spec_tail = spec[:, S : S + 1]
 
         erb_feat = erb_norm(erb(spec_model, self._df.erb_widths()), self._alpha)
         sf_feat = unit_norm(spec_model[..., :_NB_DF], self._alpha)
