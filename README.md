@@ -39,7 +39,7 @@ One instance per session. The ONNX model is loaded once per worker process and s
 hush.noise_suppression(
     strength=0.5,       # wet/dry blend: 0.0 = bypass, 1.0 = full (default 0.5)
     atten_lim_db=100.0, # max attenuation in dB (100.0 = unlimited)
-    debug_logging=False, # log per-chunk RMS every 10 chunks
+    debug_logging=False, # log per-frame RMS every 100 frames
 )
 ```
 
@@ -47,24 +47,24 @@ hush.noise_suppression(
 
 ## Architecture
 
-The model operates at 16 kHz with 10 ms frames (160 samples, 320-sample FFT). Processing is chunked: 32 frames (320 ms) are accumulated and processed together to provide the GRU layers with temporal context. The first chunk incurs 320 ms latency; subsequent chunks keep pace with the input stream.
+The model operates at 16 kHz with 10 ms frames (160 samples, 320-sample FFT). Processing is **per-frame streaming**: one 160-sample frame in, one 160-sample frame out, matching the API shape of the upstream `weya_nc` C library.
 
-To eliminate boundary clicks between chunks, each chunk (except the first) prepends 12 frames (120 ms) of audio from the previous chunk's tail as warm-up context for the GRU layers; the warm-up output is discarded. A 10 ms equal-power crossfade is applied at each chunk boundary to smooth STFT reconstruction artifacts.
+The three ONNX sub-models (`enc`, `erb_dec`, `df_dec`) have been re-exported to expose the encoder, ERB decoder, and DF decoder GRU hidden states as I/O. `HushSession` holds those three states (and a 4-frame DF filter history) and threads them through every call, so the GRU has continuous memory across the entire session — same mechanism as the C library.
 
-**Important:** During the first 320 ms, while the internal buffer fills, the output is the unprocessed input. No noise suppression is applied to the pre-roll segment. Callers should drop or flag this segment if unprocessed audio is unacceptable.
+The libdf analysis/synthesis runs in streaming mode (`reset=False`), so its filter state is carried across frames. The first frame's output is the STFT warmup (effectively zero); algorithmic latency is **1 frame (10 ms)** for the STFT lookahead, on top of GRU-state propagation which is fully causal.
 
 ### Signal flow
 
 ```
 LiveKit AudioFrame (any rate, any channels)
   → resample to 16 kHz mono
-  → buffer into 32-frame chunks
-  → prepend 12-frame warm-up tail from previous chunk (GRU context)
-  → DeepFilterLib: STFT → ERB features + DF spectral features
-  → ONNX: encoder → ERB decoder + DF decoder → enhanced spectrum
-  → discard warm-up frames
-  → DeepFilterLib: ISTFT
-  → 10 ms equal-power crossfade with previous chunk's output tail
+  → buffer 10 ms (160 samples) per frame
+  → DeepFilterLib streaming STFT (1 frame out, state carried)
+  → ERB features + DF spectral features
+  → ONNX: encoder → ERB decoder + DF decoder (with continuous GRU state)
+  → apply ERB mask + DF complex filter to spectrum
+  → apply atten_lim_db linear blend (matches upstream reference)
+  → DeepFilterLib streaming ISTFT
   → wet/dry blend
   → upsample, restore channels
 → AudioFrame
@@ -82,12 +82,13 @@ The ONNX session is a process-level singleton. Each `HushNoiseSuppressor` instan
 
 ## Inference performance
 
-| | Streaming (per chunk) | Batch (full file) |
+| | Streaming (per frame) | Batch (full file) |
 |---|---|---|
-| Chunk size | 32 frames (320 ms) | Full audio |
-| Inference time | ~6.5 ms per chunk | ~8 ms per second of audio |
-| Real-time factor | 0.02× | 0.008× |
-| Throughput | 49× real-time (~150 chunks/sec) | 129× real-time |
+| Frame size | 1 frame (10 ms) | Full audio |
+| Algorithmic latency | 10 ms | N/A (offline) |
+| Inference time | ~2-3 ms per frame | ~8 ms per second of audio |
+| Real-time factor | 0.2-0.3× | 0.008× |
+| Throughput | 4-5× real-time (~40-50 frames/sec per session) | 129× real-time |
 | Model size | ~9 MB (3 ONNX files) | |
 
 Measured on ARM64 Linux (aarch64). Steady-state throughput supports 100+ concurrent sessions per core.
@@ -96,22 +97,22 @@ Measured on ARM64 Linux (aarch64). Steady-state throughput supports 100+ concurr
 
 ## ONNX model
 
-The ONNX model bundle is from the public PyTorch checkpoint ([weya-ai/hush](https://huggingface.co/weya-ai/hush)). Output parity is verified via `scripts/verify_against_pytorch.py`, which compares the ONNX pipeline output against the original PyTorch model.
+The ONNX model bundle is from the public PyTorch checkpoint ([weya-ai/hush](https://huggingface.co/weya-ai/hush)). The three sub-models are re-exported with GRU hidden state as I/O using `scripts/export_onnx_stateful.py`; the export script downloads the PyTorch weights from Hugging Face and exports the new ONNX bundle.
+
+Output parity is verified via `scripts/verify_against_pytorch.py`, which compares the per-frame ONNX pipeline output against the original PyTorch model.
 
 ---
 
 ## Audio samples
 
-Noisy originals and their denoised counterparts. Two variants are provided:
-- **Batch** (`hush-*.wav`) — full-file normalization, best quality. Matches the PyTorch `infer_single.py` pipeline.
-- **Stream** (`hush-stream-*.wav`) — per-chunk normalization, real-time quality. Matches the LiveKit frame processor in production.
+Noisy originals and their Hush-denoised counterparts are in `docs/audio/`. The denoised files are produced by `scripts/process_audio_samples.py` using the same per-frame streaming pipeline the LiveKit frame processor uses in production (one 10 ms frame at a time, continuous GRU state, single session, no resets).
 
-| Original | Batch | Stream |
-|---|---|---|
-| [`gym.wav`](docs/audio/originals/gym.wav) | [`hush-gym.wav`](docs/audio/hush-gym.wav) | [`hush-stream-gym.wav`](docs/audio/hush-stream-gym.wav) |
-| [`krisp-original.wav`](docs/audio/originals/krisp-original.wav) | [`hush-krisp-original.wav`](docs/audio/hush-krisp-original.wav) | [`hush-stream-krisp-original.wav`](docs/audio/hush-stream-krisp-original.wav) |
-| [`noproblem_raw.wav`](docs/audio/originals/noproblem_raw.wav) | [`hush-noproblem_raw.wav`](docs/audio/hush-noproblem_raw.wav) | [`hush-stream-noproblem_raw.wav`](docs/audio/hush-stream-noproblem_raw.wav) |
-| [`taxi-sample.wav`](docs/audio/originals/taxi-sample.wav) | [`hush-taxi-sample.wav`](docs/audio/hush-taxi-sample.wav) | [`hush-stream-taxi-sample.wav`](docs/audio/hush-stream-taxi-sample.wav) |
+| Original | Denoised |
+|---|---|
+| [`gym.wav`](docs/audio/originals/gym.wav) | [`hush-gym.wav`](docs/audio/hush-gym.wav) |
+| [`krisp-original.wav`](docs/audio/originals/krisp-original.wav) | [`hush-krisp-original.wav`](docs/audio/hush-krisp-original.wav) |
+| [`noproblem_raw.wav`](docs/audio/originals/noproblem_raw.wav) | [`hush-noproblem_raw.wav`](docs/audio/hush-noproblem_raw.wav) |
+| [`taxi-sample.wav`](docs/audio/originals/taxi-sample.wav) | [`hush-taxi-sample.wav`](docs/audio/hush-taxi-sample.wav) |
 
 ---
 

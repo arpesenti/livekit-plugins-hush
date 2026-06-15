@@ -27,7 +27,7 @@ from livekit import rtc
 
 from ._hush_model import (
     HushSession,
-    _CHUNK_SAMPLES,
+    _FRAME_SAMPLES,
     _SAMPLE_RATE,
     _get_shared_model,
 )
@@ -117,15 +117,15 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         shared_model = _get_shared_model(model_path)
         self._session: HushSession = HushSession(shared_model, atten_lim_db)
 
-        # Input/output queues for handling arbitrary LiveKit frame sizes
+        # Input/output queues for handling arbitrary LiveKit frame sizes.
+        # _dry_queue is lazy: only used when strength < 1.0.
         self._input_queue: _QueueBuffer = _QueueBuffer()
         self._output_queue: _QueueBuffer = _QueueBuffer()
-        self._dry_queue: _QueueBuffer = _QueueBuffer()
+        self._dry_queue: _QueueBuffer | None = None
 
         self._strength = max(0.0, min(1.0, strength))
         self._debug_logging = debug_logging
-        self._debug_chunk_count = 0
-        self._first_processed_frame = True
+        self._debug_frame_count = 0
 
         # Resamplers — created lazily on the first frame
         self._downsampler: rtc.AudioResampler | None = None
@@ -223,43 +223,39 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
 
         self._input_queue.append(samples_16k)
         if self._strength < 1.0:
+            if self._dry_queue is None:
+                self._dry_queue = _QueueBuffer()
             self._dry_queue.append(samples_16k)
 
-        # Process in 32-frame chunks (5120 samples)
-        while len(self._input_queue) >= _CHUNK_SAMPLES:
-            chunk_in = self._input_queue.peek(_CHUNK_SAMPLES)
-            self._input_queue.popleft(_CHUNK_SAMPLES)
+        # Process in 10 ms frames (160 samples at 16 kHz)
+        while len(self._input_queue) >= _FRAME_SAMPLES:
+            frame_in = self._input_queue.peek(_FRAME_SAMPLES)
+            self._input_queue.popleft(_FRAME_SAMPLES)
 
-            chunk_out = self._session.process_chunk(chunk_in)
+            frame_out = self._session.process_frame(frame_in)
 
-            self._output_queue.append(chunk_out)
+            self._output_queue.append(frame_out)
 
             if self._debug_logging:
-                if self._debug_chunk_count % 10 == 0:
+                if self._debug_frame_count % 100 == 0:
                     logger.debug(
-                        "Hush chunk: input_rms=%.5f output_rms=%.5f strength=%.2f",
-                        float(np.sqrt(np.mean(chunk_in**2))),
-                        float(np.sqrt(np.mean(chunk_out**2))),
+                        "Hush frame: input_rms=%.5f output_rms=%.5f strength=%.2f",
+                        float(np.sqrt(np.mean(frame_in**2))),
+                        float(np.sqrt(np.mean(frame_out**2))),
                         self._strength,
                     )
-                self._debug_chunk_count += 1
+                self._debug_frame_count += 1
 
         # Drain the same number of samples that went IN
         n_16k = len(samples_16k)
         if len(self._output_queue) < n_16k:
-            return frame  # filling up during startup latency
-
-        if self._first_processed_frame:
-            self._first_processed_frame = False
-            logger.debug(
-                "Hush started processing — first 320 ms of session was unmodified pre-roll"
-            )
+            return frame  # resampler produced no output yet
 
         out_16k = self._output_queue.peek(n_16k)
         self._output_queue.popleft(n_16k)
 
         # Wet/dry blend
-        if self._strength < 1.0:
+        if self._strength < 1.0 and self._dry_queue is not None:
             dry_16k = self._dry_queue.peek(n_16k)
             self._dry_queue.popleft(n_16k)
             out_16k = self._strength * out_16k + (1.0 - self._strength) * dry_16k
@@ -306,17 +302,6 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
             num_channels=frame.num_channels,
             samples_per_channel=frame.samples_per_channel,
         )
-
-    def __enter__(self) -> "HushNoiseSuppressor":
-        return self
-
-    def __exit__(
-        self,
-        exc_type: Optional[type],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[object],
-    ) -> None:
-        self._close()
 
     def _close(self) -> None:
         self._enabled = False

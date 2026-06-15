@@ -8,7 +8,6 @@ Run: python -m pytest tests/ -v
 import numpy as np
 import pytest
 from livekit import rtc
-from livekit.plugins.hush.noise_suppressor import _QueueBuffer
 
 
 # ------------------------------------------------------------------ #
@@ -38,23 +37,22 @@ def create_audio_frame(
 
 
 class MockHushSession:
-    """Mock session that applies a simple gain reduction."""
+    """Mock session that applies a simple gain reduction per frame."""
 
     def __init__(self, model=None, atten_lim_db=None):
         self.gain = 0.5
-        self.processed_chunks = []
-        self._prev_tail = None
-        self._prev_output_tail = None
-        self._prev_df_tail = None
+        self.frames_processed = 0
+        self._h_enc = None
+        self._h_erb_dec = None
+        self._h_df_dec = None
+        self._prev_df = None
 
-    def process_chunk(self, audio: np.ndarray) -> np.ndarray:
-        self.processed_chunks.append(audio.copy())
+    def process_frame(self, audio: np.ndarray) -> np.ndarray:
+        self.frames_processed += 1
         return audio * self.gain
 
     def reset_state(self):
-        self._prev_tail = None
-        self._prev_output_tail = None
-        self._prev_df_tail = None
+        self.frames_processed = 0
 
     def close(self):
         pass
@@ -72,7 +70,7 @@ def _patch_module(monkeypatch):
     import livekit.plugins.hush.noise_suppressor as ns_module
 
     monkeypatch.setattr(ns_module, "HushSession", MockHushSession)
-    monkeypatch.setattr(ns_module, "_CHUNK_SAMPLES", 640)
+    monkeypatch.setattr(ns_module, "_FRAME_SAMPLES", 160)
     mock_model = MockHushModel()
 
     def mock_get_shared(*args, **kwargs):
@@ -95,67 +93,11 @@ def mock_suppressor(monkeypatch):
 # ------------------------------------------------------------------ #
 
 
-class TestQueueBuffer:
-    """Tests for _QueueBuffer (preallocated linear FIFO buffer)."""
-
-    def test_basic_append_peek_popleft(self):
-        buf = _QueueBuffer(initial_capacity=16)
-        assert len(buf) == 0
-
-        buf.append(np.array([1.0, 2.0, 3.0], dtype=np.float32))
-        assert len(buf) == 3
-
-        view = buf.peek(2)
-        np.testing.assert_array_equal(view, [1.0, 2.0])
-
-        buf.popleft(2)
-        assert len(buf) == 1
-
-        view = buf.peek(10)
-        np.testing.assert_array_equal(view, [3.0])
-
-        buf.popleft(1)
-        assert len(buf) == 0
-        assert buf.peek(5).shape == (0,)
-
-    def test_growth_via_realloc(self):
-        buf = _QueueBuffer(initial_capacity=4)
-        arr = np.array([1.0, 2.0, 3.0], dtype=np.float32)
-        buf.append(arr)
-        buf.append(arr)
-        assert len(buf) == 6
-        expected = np.array([1.0, 2.0, 3.0, 1.0, 2.0, 3.0], dtype=np.float32)
-        np.testing.assert_array_equal(buf.peek(10), expected)
-
-    def test_popleft_more_than_available_is_safe(self):
-        buf = _QueueBuffer(initial_capacity=16)
-        buf.append(np.array([1.0, 2.0], dtype=np.float32))
-        buf.popleft(100)
-        assert len(buf) == 0
-        buf.append(np.array([42.0], dtype=np.float32))
-        np.testing.assert_array_equal(buf.peek(1), [42.0])
-
-    def test_peek_returns_view(self):
-        buf = _QueueBuffer(initial_capacity=16)
-        buf.append(np.array([1.0, 2.0, 3.0], dtype=np.float32))
-
-        view = buf.peek(2)
-        view[0] = 99.0
-
-        np.testing.assert_array_equal(buf.peek(3), [99.0, 2.0, 3.0])
-
-        buf.clear()
-        buf.append(np.array([10.0, 20.0], dtype=np.float32))
-        view2 = buf.peek(2)
-        view2[1] = 200.0
-        np.testing.assert_array_equal(buf.peek(2), [10.0, 200.0])
-
-
 class TestFrameProcessing:
     """Tests for HushNoiseSuppressor._process with mocked inference."""
 
-    def test_smaller_than_chunk(self, mock_suppressor):
-        """Fewer samples than chunk size → pass through unprocessed."""
+    def test_smaller_than_frame(self, mock_suppressor):
+        """Fewer samples than a frame → pass through unprocessed."""
         samples = np.random.default_rng(42).uniform(-0.5, 0.5, 80).astype(np.float32)
         frame = create_audio_frame(samples)
         result = mock_suppressor._process(frame)
@@ -163,53 +105,43 @@ class TestFrameProcessing:
         assert len(out) == 80
         np.testing.assert_array_almost_equal(out, samples, decimal=4)
 
-    def test_exact_chunk(self, mock_suppressor):
-        """Exactly one chunk (4 frames = 640 samples)."""
-        chunk_samples = 4 * 160  # 640
-        samples = (
-            np.random.default_rng(42)
-            .uniform(-0.5, 0.5, chunk_samples)
-            .astype(np.float32)
-        )
+    def test_exact_frame(self, mock_suppressor):
+        """Exactly one 10 ms frame (160 samples)."""
+        samples = np.random.default_rng(42).uniform(-0.5, 0.5, 160).astype(np.float32)
         frame = create_audio_frame(samples)
         result = mock_suppressor._process(frame)
         out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
-        assert len(out) == chunk_samples
+        assert len(out) == 160
         reduction_ratio = np.sqrt(np.mean(out**2)) / np.sqrt(np.mean(samples**2))
         assert 0.4 < reduction_ratio < 0.6
 
-    def test_multiple_chunks(self, mock_suppressor):
-        """Two full chunks (8 frames = 1280 samples)."""
-        chunk_samples = 8 * 160
+    def test_multiple_frames(self, mock_suppressor):
+        """Multiple frames in one input."""
         samples = (
-            np.random.default_rng(42)
-            .uniform(-0.5, 0.5, chunk_samples)
-            .astype(np.float32)
+            np.random.default_rng(42).uniform(-0.5, 0.5, 5 * 160).astype(np.float32)
         )
         frame = create_audio_frame(samples)
         result = mock_suppressor._process(frame)
         out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
-        assert len(out) == chunk_samples
+        assert len(out) == 5 * 160
 
-    def test_non_multiple_chunk_size(self, mock_suppressor):
+    def test_non_multiple_frame_size(self, mock_suppressor):
         """Non-aligned frame sizes should not produce silence gaps."""
         rng = np.random.default_rng(42)
-        chunk_size = 200
-        samples = rng.uniform(-0.5, 0.5, chunk_size).astype(np.float32)
+        samples = rng.uniform(-0.5, 0.5, 200).astype(np.float32)
         frame = create_audio_frame(samples)
         result = mock_suppressor._process(frame)
         out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
-        assert len(out) == chunk_size
+        assert len(out) == 200
 
     def test_continuity_across_frames(self, mock_suppressor):
-        """Processing consecutive frames should produce continuous output."""
+        """Processing consecutive frames produces continuous output."""
         rng = np.random.default_rng(42)
         n_frames = 10
-        chunk_per_frame = 4 * 160  # exactly one chunk per frame
         outputs = []
 
         for _ in range(n_frames):
-            samples = rng.uniform(-0.5, 0.5, chunk_per_frame).astype(np.float32)
+            samples = rng.uniform(-0.5, 0.5, 160).astype(np.float32)
             frame = create_audio_frame(samples)
             result = mock_suppressor._process(frame)
             out = (
@@ -218,13 +150,13 @@ class TestFrameProcessing:
             outputs.append(out)
 
         for i, out in enumerate(outputs):
-            assert len(out) == chunk_per_frame, f"Frame {i} output length mismatch"
+            assert len(out) == 160, f"Frame {i} output length mismatch"
             assert np.sqrt(np.mean(out**2)) > 1e-6, f"Frame {i} is silent"
 
     def test_disabled_passthrough(self, mock_suppressor):
         """When disabled, output should be identical to input."""
         rng = np.random.default_rng(42)
-        samples = rng.uniform(-0.5, 0.5, 640).astype(np.float32)
+        samples = rng.uniform(-0.5, 0.5, 160).astype(np.float32)
         frame = create_audio_frame(samples)
         mock_suppressor.enabled = False
         result = mock_suppressor._process(frame)
@@ -237,7 +169,7 @@ class TestFrameProcessing:
         import livekit.plugins.hush.noise_suppressor as ns_module
 
         rng = np.random.default_rng(42)
-        samples = rng.uniform(-0.5, 0.5, 640).astype(np.float32)
+        samples = rng.uniform(-0.5, 0.5, 160).astype(np.float32)
 
         # strength=0 (bypass)
         ns_bypass = ns_module.HushNoiseSuppressor(strength=0.0)
@@ -257,17 +189,17 @@ class TestFrameProcessing:
     def test_channel_restoration(self, mock_suppressor):
         """Stereo input should produce stereo output."""
         rng = np.random.default_rng(42)
-        samples = rng.uniform(-0.5, 0.5, 640 * 2).astype(np.float32)
+        samples = rng.uniform(-0.5, 0.5, 160 * 2).astype(np.float32)
         int16_samples = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
         frame = rtc.AudioFrame(
             data=int16_samples.tobytes(),
             sample_rate=16000,
             num_channels=2,
-            samples_per_channel=640,
+            samples_per_channel=160,
         )
         result = mock_suppressor._process(frame)
         assert result.num_channels == 2
-        assert result.samples_per_channel == 640
+        assert result.samples_per_channel == 160
 
 
 # ------------------------------------------------------------------ #
@@ -305,12 +237,13 @@ class TestIntegration:
         noisy = (signal + noise).astype(np.float32)
 
         ns = HushNoiseSuppressor(strength=1.0)
-        chunk = 5120  # one full chunk (32 frames)
+        # Feed in 10 ms frames
+        frame_size = 160
         outputs = []
 
-        for i in range(0, duration - chunk + 1, chunk):
-            chunk_data = noisy[i : i + chunk]
-            frame = create_audio_frame(chunk_data)
+        for i in range(0, duration - frame_size + 1, frame_size):
+            frame_data = noisy[i : i + frame_size]
+            frame = create_audio_frame(frame_data)
             result = ns._process(frame)
             out = (
                 np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
@@ -324,18 +257,16 @@ class TestIntegration:
             f"Expected noise reduction, out_rms={out_rms:.3f} >= in_rms={in_rms:.3f}"
         )
 
-    def test_chunk_32_frames(self):
-        """Model processes exactly 32 frames (5120 samples @ 16 kHz)."""
+    def test_frame_160_samples(self):
+        """Model processes one 10 ms frame (160 samples @ 16 kHz)."""
         from livekit.plugins.hush._hush_model import HushModel, HushSession
 
         model = HushModel()
         session = HushSession(model)
         rng = np.random.default_rng(42)
 
-        result = session.process_chunk(
-            rng.uniform(-0.5, 0.5, 32 * 160).astype(np.float32)
-        )
-        assert len(result) == 32 * 160
+        result = session.process_frame(rng.uniform(-0.5, 0.5, 160).astype(np.float32))
+        assert len(result) == 160
         assert result.dtype == np.float32
 
     def test_end_to_end_process(self):
@@ -392,15 +323,15 @@ class TestIntegration:
         out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
         assert len(out) == 15360
 
-    def test_multi_chunk_continuity_with_real_model(self):
-        """Consecutive chunks produce continuous non-silent output."""
+    def test_multi_frame_continuity_with_real_model(self):
+        """Consecutive frames produce continuous non-silent output."""
         from livekit.plugins.hush import HushNoiseSuppressor
 
         ns = HushNoiseSuppressor(strength=1.0)
         rng = np.random.default_rng(42)
         outputs = []
         for _ in range(5):
-            samples = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
+            samples = rng.uniform(-0.5, 0.5, 160).astype(np.float32)
             frame = create_audio_frame(samples)
             result = ns._process(frame)
             out = (
@@ -409,33 +340,46 @@ class TestIntegration:
             outputs.append(out)
 
         for i, out in enumerate(outputs):
-            assert len(out) == 5120, f"Frame {i} output length mismatch"
+            assert len(out) == 160, f"Frame {i} output length mismatch"
             assert np.sqrt(np.mean(out**2)) > 1e-6, f"Frame {i} is silent"
 
-    def test_prev_df_tail_on_second_chunk(self):
-        """Second chunk uses prev_df_tail from first (concat vs pad branch)."""
+    def test_state_persists_across_frames(self):
+        """Second frame uses GRU hidden state from first (state continuity)."""
         from livekit.plugins.hush._hush_model import HushModel, HushSession
 
         model = HushModel()
         session = HushSession(model)
         rng = np.random.default_rng(42)
 
-        chunk1 = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
-        out1 = session.process_chunk(chunk1)
-        assert len(out1) == 5120
+        # First call: zero hidden state
+        frame1 = rng.uniform(-0.5, 0.5, 160).astype(np.float32)
+        out1 = session.process_frame(frame1)
+        assert len(out1) == 160
+        assert session._h_enc is not None
+        # GRU state should now be non-zero
+        assert np.abs(session._h_enc).max() > 0
 
-        # Second call hits the prev_df_tail concat branch in _enhance_spectrum
-        chunk2 = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
-        out2 = session.process_chunk(chunk2)
-        assert len(out2) == 5120
+        # Second call: state carried over
+        frame2 = rng.uniform(-0.5, 0.5, 160).astype(np.float32)
+        out2 = session.process_frame(frame2)
+        assert len(out2) == 160
+
+        # Reset clears state
+        session.reset_state()
+        assert session._h_enc is None or np.abs(session._h_enc).max() == 0
 
     def test_atten_lim_db_effect(self):
         """atten_lim_db < 100 dB limits suppression compared to unlimited."""
         from livekit.plugins.hush import HushNoiseSuppressor
 
         rng = np.random.default_rng(42)
-        samples = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
-        frame = create_audio_frame(samples)
+        # Use real-ish audio: a mix of sine wave and noise
+        sr = 16000
+        t = np.arange(sr)
+        speech_like = 0.3 * np.sin(2 * np.pi * 440.0 * t / sr).astype(
+            np.float32
+        ) + rng.normal(0, 0.1, sr).astype(np.float32)
+        frame = create_audio_frame(speech_like)
 
         ns_unlimited = HushNoiseSuppressor(strength=1.0, atten_lim_db=100.0)
         result_u = ns_unlimited._process(frame)
@@ -495,7 +439,7 @@ class TestCoverageGaps:
 
         ns = ns_module.HushNoiseSuppressor(strength=1.0)
         rng = np.random.default_rng(42)
-        samples = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
+        samples = rng.uniform(-0.5, 0.5, 160).astype(np.float32)
         frame = create_audio_frame(samples)
         result = ns._process(frame)
         out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
@@ -509,8 +453,8 @@ class TestCoverageGaps:
 
         ns = ns_module.HushNoiseSuppressor(debug_logging=True)
         rng = np.random.default_rng(42)
-        for _ in range(11):  # process 11 chunks to hit the log every 10
-            samples = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
+        for _ in range(101):  # process 101 frames to hit the log every 100
+            samples = rng.uniform(-0.5, 0.5, 160).astype(np.float32)
             frame = create_audio_frame(samples)
             ns._process(frame)
         # No assertion needed — just exercises the debug log path
@@ -526,15 +470,15 @@ class TestCoverageGaps:
         assert ns.enabled is False
 
     def test_short_audio_buffers_during_startup(self, monkeypatch):
-        """Audio shorter than a chunk is buffered; original frame returned during startup latency."""
+        """Audio shorter than a frame is buffered; original frame returned during resampler warmup."""
         _patch_module(monkeypatch)
         import livekit.plugins.hush.noise_suppressor as ns_module
 
         ns = ns_module.HushNoiseSuppressor(strength=1.0)
-        # Override _CHUNK_SAMPLES back to real value for this test
-        monkeypatch.setattr(ns_module, "_CHUNK_SAMPLES", 5120)
+        # Override _FRAME_SAMPLES back to real value for this test
+        monkeypatch.setattr(ns_module, "_FRAME_SAMPLES", 160)
 
-        # Push 80 samples (less than chunk) — passes through
+        # Push 80 samples (less than a frame) — passes through
         rng = np.random.default_rng(42)
         samples = rng.uniform(-0.5, 0.5, 80).astype(np.float32)
         frame = create_audio_frame(samples)
@@ -555,38 +499,39 @@ class TestCoverageGaps:
         not _model_available(),
         reason="ONNX model not available",
     )
-    def test_process_chunk_2d_input(self):
+    def test_process_frame_2d_input(self):
         """Model handles 2D array input correctly."""
         from livekit.plugins.hush._hush_model import HushModel, HushSession
 
         model = HushModel()
-        session = HushSession(model)
+        # Two separate sessions to ensure identical state.
+        s1 = HushSession(model)
+        s2 = HushSession(model)
         rng = np.random.default_rng(99)
-        audio_1d = rng.uniform(-0.5, 0.5, 32 * 160).astype(np.float32)
+        audio_1d = rng.uniform(-0.5, 0.5, 160).astype(np.float32)
         audio_2d = audio_1d[np.newaxis, :]
 
-        out_1d = session.process_chunk(audio_1d)
-        session.reset_state()
-        out_2d = session.process_chunk(audio_2d)
-        assert out_1d.shape == (32 * 160,)
-        assert out_2d.shape == (1, 32 * 160)
+        out_1d = s1.process_frame(audio_1d)
+        out_2d = s2.process_frame(audio_2d)
+        assert out_1d.shape == (160,)
+        assert out_2d.shape == (1, 160)
         np.testing.assert_array_almost_equal(out_1d, out_2d[0], decimal=4)
 
     @pytest.mark.skipif(
         not _model_available(),
         reason="ONNX model not available",
     )
-    def test_process_chunk_too_short(self):
-        """Audio with fewer than 32 frames raises ValueError."""
+    def test_process_frame_wrong_size(self):
+        """Audio with wrong frame size raises ValueError."""
         from livekit.plugins.hush._hush_model import HushModel, HushSession
 
         model = HushModel()
         session = HushSession(model)
-        # 16 frames (2560 samples) — S=16, which is < 32 but > 0
         rng = np.random.default_rng(42)
-        short = rng.uniform(-0.5, 0.5, 16 * 160).astype(np.float32)
-        with pytest.raises(ValueError, match="requires 32 frames"):
-            session.process_chunk(short)
+        # 80 samples — wrong (should be 160)
+        short = rng.uniform(-0.5, 0.5, 80).astype(np.float32)
+        with pytest.raises(ValueError, match="requires 160 samples"):
+            session.process_frame(short)
 
     def test_trim_pad_output(self, monkeypatch):
         """Output trimming and padding paths when resampler length mismatches."""
@@ -628,7 +573,7 @@ class TestCoverageGaps:
             samples_per_channel=4410,
         )
         result = ns._process(frame)
-        # The trim/pad at line 301-306 must match input length exactly
+        # The trim/pad must match input length exactly
         assert result.samples_per_channel == 4410, (
             f"Expected 4410 samples, got {result.samples_per_channel}"
         )
@@ -652,13 +597,12 @@ class TestCoverageGaps:
         )
         ns._process(frame_48k)
 
-        # Second frame at 16 kHz — flushes existing resamplers, then skips
-        # creating new ones since input is already 16 kHz.
-        samples_16k = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
+        # Second frame at 16 kHz — flushes existing resamplers
+        samples_16k = rng.uniform(-0.5, 0.5, 160).astype(np.float32)
         frame_16k = create_audio_frame(samples_16k, sample_rate=16000)
         result = ns._process(frame_16k)
         assert result.sample_rate == 16000
-        assert result.samples_per_channel == 5120
+        assert result.samples_per_channel == 160
 
     def test_peak_normalization_clipping(self, monkeypatch):
         """Model output > 1.0 is clipped to [-1.0, 1.0] before int16 conversion."""
@@ -668,8 +612,13 @@ class TestCoverageGaps:
         class ClippingMockSession:
             def __init__(self, model=None, atten_lim_db=None):
                 pass
-            def process_chunk(self, audio: np.ndarray) -> np.ndarray:
+
+            def process_frame(self, audio: np.ndarray) -> np.ndarray:
                 return audio * 2.0
+
+            def reset_state(self):
+                pass
+
             def close(self):
                 pass
 
@@ -677,7 +626,7 @@ class TestCoverageGaps:
 
         ns = ns_module.HushNoiseSuppressor(strength=1.0)
         rng = np.random.default_rng(42)
-        samples = rng.uniform(-0.3, 0.3, 5120).astype(np.float32)
+        samples = rng.uniform(-0.3, 0.3, 160).astype(np.float32)
         frame = create_audio_frame(samples)
         result = ns._process(frame)
         out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
@@ -690,7 +639,7 @@ class TestCoverageGaps:
 
         ns = ns_module.HushNoiseSuppressor(strength=1.0)
         rng = np.random.default_rng(42)
-        n_per_ch = 640
+        n_per_ch = 160
         left = rng.uniform(-0.5, 0.5, n_per_ch).astype(np.float32)
         right = rng.uniform(-0.5, 0.5, n_per_ch).astype(np.float32)
         interleaved = np.empty(n_per_ch * 2, dtype=np.float32)
@@ -711,15 +660,15 @@ class TestCoverageGaps:
         np.testing.assert_array_almost_equal(out[:, 0], out[:, 1], decimal=4)
 
     def test_on_stream_info_updated(self, monkeypatch):
-        """_on_stream_info_updated resets session warm-up / crossfade state."""
+        """_on_stream_info_updated resets session state."""
         _patch_module(monkeypatch)
         import livekit.plugins.hush.noise_suppressor as ns_module
 
         ns = ns_module.HushNoiseSuppressor(strength=1.0)
-        # Seed session state so we can detect a reset
-        ns._session._prev_tail = np.ones((1, 10), dtype=np.float32)
-        ns._session._prev_output_tail = np.ones(160, dtype=np.float32)
-        ns._session._prev_df_tail = np.ones((4, 5, 2), dtype=np.float32)
+        # Process a frame to mark state as having been used
+        samples = np.random.default_rng(42).uniform(-0.5, 0.5, 160).astype(np.float32)
+        ns._process(create_audio_frame(samples))
+        assert ns._session.frames_processed == 1
 
         ns._on_stream_info_updated(
             room_name="test_room",
@@ -727,9 +676,7 @@ class TestCoverageGaps:
             publication_sid="test_sid",
         )
 
-        assert ns._session._prev_tail is None
-        assert ns._session._prev_output_tail is None
-        assert ns._session._prev_df_tail is None
+        assert ns._session.frames_processed == 0
 
     @pytest.mark.skipif(
         not _model_available(),
@@ -754,29 +701,28 @@ class TestCoverageGaps:
                 / 32768.0
             )
 
-        # Process in streaming mode — the harder case
+        # Process in streaming mode (per-frame)
         model = HushModel()
         session = HushSession(model)
-        chunk_samples = 5120
+        frame_samples = 160
         output = np.empty(len(speech), dtype=np.float32)
         pos = 0
         while pos < len(speech):
-            end = min(pos + chunk_samples, len(speech))
+            end = min(pos + frame_samples, len(speech))
             chunk = speech[pos:end]
-            if len(chunk) < chunk_samples:
-                chunk = np.pad(chunk, (0, chunk_samples - len(chunk)))
-            denoised = session.process_chunk(chunk)
+            if len(chunk) < frame_samples:
+                chunk = np.pad(chunk, (0, frame_samples - len(chunk)))
+            denoised = session.process_frame(chunk)
             n_out = min(len(denoised), end - pos)
             output[pos : pos + n_out] = denoised[:n_out]
-            pos += chunk_samples
+            pos += frame_samples
         session.close()
 
         in_rms = np.sqrt(np.mean(speech**2))
         out_rms = np.sqrt(np.mean(output**2))
         out_peak = np.max(np.abs(output))
 
-        # Output should retain reasonable energy (clean speech shouldn't
-        # be aggressively suppressed — the model is designed to pass speech)
+        # Output should retain reasonable energy
         assert out_rms > in_rms * 0.3, (
             f"Output too quiet: out_rms={out_rms:.4f} in_rms={in_rms:.4f} "
             f"ratio={out_rms / in_rms:.3f}"

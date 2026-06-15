@@ -1,37 +1,50 @@
-"""Hush model inference using DeepFilterLib + ONNX Runtime.
+"""Hush model inference using DeepFilterLib + ONNX Runtime, per-frame streaming.
 
-Uses three ONNX sub-models (encoder, ERB decoder, DF decoder) from the
-official C library bundle. Consecutive chunks are processed with
-overlapping context so the GRU hidden state is seeded by previous frames,
-eliminating rhythmic clicking at 32-frame boundaries.
+Matches the API shape of the upstream ``weya_nc`` C library: one 10 ms frame
+in, one 10 ms frame out, with continuous GRU hidden state across calls.
 
-Feature extraction uses the ``libdf`` C library. No PyTorch required.
+The encoder, ERB decoder, and DF decoder each carry a SqueezedGRU whose
+hidden state is exposed as an ONNX I/O. ``HushSession`` holds those three
+states (and a 4-frame DF filter history) as plain numpy arrays, threading
+them through every ``process_frame`` call.
+
+Feature extraction uses the ``libdf`` C library, with ``reset=False`` so its
+analysis and synthesis filter state is carried across frames. No PyTorch
+required.
+
+Re-exporting the ONNX sub-models with GRU state I/O: see
+``scripts/export_onnx_stateful.py``.
 """
 
 import logging
 import os
 import threading
+
 import numpy as np
 import onnxruntime as ort
 from libdf import DF, erb, erb_norm, unit_norm
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Model constants
+# ---------------------------------------------------------------------------
+
 _SAMPLE_RATE = 16_000
 _FFT_SIZE = 320
 _HOP_SIZE = 160
+_FRAME_SAMPLES = _HOP_SIZE  # 160 samples = 10 ms at 16 kHz
 _NB_ERB = 32
 _NB_DF = 64
 _NORM_TAU = 1.0
 _DF_ORDER = 5
-_CHUNK_FRAMES = 32
-_CHUNK_SAMPLES = _CHUNK_FRAMES * _HOP_SIZE
 
-# Number of "warm-up" frames prepended to each chunk (except the first).
-# These frames are discarded from the output but provide GRU context from
-# the previous chunk. 12 frames provides a good trade-off between quality
-# and overhead (~38% more computation).
-_WARMUP_FRAMES = 12
+# GRU hidden state dimensions (must match the ONNX export)
+_EMB_HIDDEN = 256
+_DF_HIDDEN = 256
+_ENC_NUM_LAYERS = 1
+_ERB_DEC_NUM_LAYERS = 1
+_DF_DEC_NUM_LAYERS = 3
 
 _DEFAULT_MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
 
@@ -62,9 +75,9 @@ def _build_erb_inv_fb():
     return fb.T.copy()
 
 
-# ------------------------------------------------------------------ #
-# Shared model (one per process)                                      #
-# ------------------------------------------------------------------ #
+# ---------------------------------------------------------------------------
+# Shared model (one per process)
+# ---------------------------------------------------------------------------
 
 _shared_model = None
 _shared_model_lock = threading.Lock()
@@ -92,7 +105,8 @@ class HushModel:
             if not os.path.exists(p):
                 raise FileNotFoundError(
                     f"ONNX model not found: {p}\n"
-                    "Please ensure the sub-model files are present."
+                    "Please ensure the sub-model files are present. "
+                    "Re-export with scripts/export_onnx_stateful.py if needed."
                 )
 
         self.enc_sess = ort.InferenceSession(
@@ -106,67 +120,66 @@ class HushModel:
         )
         self.erb_inv_fb = _build_erb_inv_fb()
 
-        self._enc_input_names = [i.name for i in self.enc_sess.get_inputs()]
-        self._enc_output_names = [
-            o.name for o in self.enc_sess.get_outputs() if o.name != "lsnr"
-        ]
-        self._enc_out_idx = {name: i for i, name in enumerate(self._enc_output_names)}
-
-        # Warm-up
-        S = _CHUNK_FRAMES
-        dummy_erb = np.zeros((1, 1, S, _NB_ERB), dtype=np.float32)
-        dummy_spec = np.zeros((1, 2, S, _NB_DF), dtype=np.float32)
-        enc_out = self.enc_sess.run(
-            self._enc_output_names,
+        # Warm-up: trigger ONNX Runtime JIT compilation once. Use a
+        # 1-frame input with zero hidden state.
+        s = 1
+        self.enc_sess.run(
+            None,
             {
-                self._enc_input_names[0]: dummy_erb,
-                self._enc_input_names[1]: dummy_spec,
+                "feat_erb": np.zeros((1, 1, s, _NB_ERB), dtype=np.float32),
+                "feat_spec": np.zeros((1, 2, s, _NB_DF), dtype=np.float32),
+                "h_enc_in": np.zeros(
+                    (_ENC_NUM_LAYERS, 1, _EMB_HIDDEN), dtype=np.float32
+                ),
             },
         )
-        idx = self._enc_out_idx
         self.erb_dec_sess.run(
             None,
             {
-                "emb": enc_out[idx["emb"]],
-                "e3": enc_out[idx["e3"]],
-                "e2": enc_out[idx["e2"]],
-                "e1": enc_out[idx["e1"]],
-                "e0": enc_out[idx["e0"]],
+                "emb": np.zeros((1, s, 128), dtype=np.float32),
+                "e3": np.zeros((1, 16, s, 8), dtype=np.float32),
+                "e2": np.zeros((1, 16, s, 8), dtype=np.float32),
+                "e1": np.zeros((1, 16, s, 16), dtype=np.float32),
+                "e0": np.zeros((1, 16, s, 32), dtype=np.float32),
+                "h_erb_dec_in": np.zeros(
+                    (_ERB_DEC_NUM_LAYERS, 1, _EMB_HIDDEN), dtype=np.float32
+                ),
             },
         )
         self.df_dec_sess.run(
-            None, {"emb": enc_out[idx["emb"]], "c0": enc_out[idx["c0"]]}
+            None,
+            {
+                "emb": np.zeros((1, s, 128), dtype=np.float32),
+                "c0": np.zeros((1, 16, s, _NB_DF), dtype=np.float32),
+                "h_df_dec_in": np.zeros(
+                    (_DF_DEC_NUM_LAYERS, 1, _DF_HIDDEN), dtype=np.float32
+                ),
+            },
         )
         logger.debug("Hush ONNX models warm-up complete")
 
 
-# ------------------------------------------------------------------ #
-# Per-session state                                                   #
-# ------------------------------------------------------------------ #
+# ---------------------------------------------------------------------------
+# Per-session state
+# ---------------------------------------------------------------------------
 
 
 class HushSession:
-    """Per-stream denoising session with overlapping-chunk GRU context."""
+    """Per-stream denoising session, matching the C library's API shape.
 
-    def __init__(self, model, atten_lim_db=100.0):
-        if atten_lim_db < 0:
-            logger.warning(
-                "atten_lim_db=%g is negative; clamping to 0 (no attenuation limit). "
-                "Negative values boost gain instead of limiting attenuation.",
-                atten_lim_db,
-            )
-            atten_lim_db = 0.0
+    One frame of 160 samples (10 ms) in, one frame out, with continuous
+    GRU hidden state and DF filter history across calls. ``reset_state()``
+    clears all state.
+    """
+
+    def __init__(self, model, atten_lim_db: float = 100.0):
         self._enc_sess = model.enc_sess
         self._erb_dec_sess = model.erb_dec_sess
         self._df_dec_sess = model.df_dec_sess
-        self._enc_input_names = model._enc_input_names
-        self._enc_output_names = model._enc_output_names
-        self._enc_out_idx = model._enc_out_idx
         self._erb_inv_fb = model.erb_inv_fb
-        self._atten_lim_db = atten_lim_db
-        self._apply_atten_lim = atten_lim_db < 100.0
-        self._min_gain = 10.0 ** (-atten_lim_db / 20.0) if self._apply_atten_lim else 0.0
 
+        # libdf state — runs in streaming mode (reset=False) so the
+        # analysis/synthesis filter state is carried across frames.
         self._df = DF(
             sr=_SAMPLE_RATE,
             fft_size=_FFT_SIZE,
@@ -176,190 +189,172 @@ class HushSession:
         )
         self._alpha = _compute_alpha(_SAMPLE_RATE, _HOP_SIZE, _NORM_TAU)
 
-        # Saved tail of the previous chunk for warm-up overlap
-        self._prev_tail = None
+        # Precompute the linear-blend attenuation coefficient. The
+        # upstream reference (`scripts/infer_single.py` in pulp-vision/Hush)
+        # does:  spec_out = spec_in * lim + spec_enh * (1.0 - lim)
+        # where lim = 10**(-atten_lim_db / 20). lim=1.0 → passthrough,
+        # lim=0.0 → full model output. Default 100.0 dB → lim ≈ 1e-5,
+        # effectively a passthrough of the model output.
+        if atten_lim_db < 100.0:
+            self._lim = 10.0 ** (-atten_lim_db / 20.0)
+        else:
+            self._lim = 0.0
 
-        # Saved tail of the previous chunk's DF-filter history for
-        # polynomial-prediction seeding (5-tap filter).
-        self._prev_df_tail = None
+        # State: all zeroed on init / reset. Shapes:
+        #   _h_enc:      [ENC_NUM_LAYERS, 1, EMB_HIDDEN]
+        #   _h_erb_dec:  [ERB_DEC_NUM_LAYERS, 1, EMB_HIDDEN]
+        #   _h_df_dec:   [DF_DEC_NUM_LAYERS, 1, DF_HIDDEN]
+        #   _prev_df:    [_DF_ORDER-1, _NB_DF, 2] float32 (DF filter history)
+        self._reset_state()
 
-        # Crossfade: last CROSSFADE_SAMPLES of previous chunk's output
-        self._crossfade_samples = _HOP_SIZE  # 160 samples = 10ms
-        self._prev_output_tail = None
+    def _reset_state(self):
+        self._h_enc = np.zeros((_ENC_NUM_LAYERS, 1, _EMB_HIDDEN), dtype=np.float32)
+        self._h_erb_dec = np.zeros(
+            (_ERB_DEC_NUM_LAYERS, 1, _EMB_HIDDEN), dtype=np.float32
+        )
+        self._h_df_dec = np.zeros((_DF_DEC_NUM_LAYERS, 1, _DF_HIDDEN), dtype=np.float32)
+        self._prev_df = np.zeros((_DF_ORDER - 1, _NB_DF, 2), dtype=np.float32)
+        # Reset libdf's analysis/synthesis filter state so the next
+        # audio stream starts from a clean STFT. The first 10 ms
+        # after reset will be the STFT warmup (output near zero).
+        if self._df is not None:
+            self._df.reset()
 
-    def _enhance_spectrum(self, spec_chunk, erb_chunk, sf_chunk, prev_df_tail=None):
-        """Run the model on one batch of spectrum frames.
+    def reset_state(self) -> None:
+        """Reset all per-stream state for a new audio source.
 
-        Returns (enhanced_spectrum, df_tail_for_next_chunk).
+        Clears the encoder/decoder GRU hidden states, the DF filter
+        history, and the libdf STFT filter state. The first 10 ms of
+        audio after a reset will be the STFT warmup (output near zero);
+        this matches the C library's ``weya_nc_reset`` behavior.
         """
-        S = spec_chunk.shape[1]
-        enc_out = self._enc_sess.run(
-            self._enc_output_names,
-            {
-                self._enc_input_names[0]: erb_chunk[:, np.newaxis, :, :],
-                self._enc_input_names[1]: np.stack(
-                    [sf_chunk.real, sf_chunk.imag], axis=1
-                ),
-            },
-        )
-        idx = self._enc_out_idx
+        self._reset_state()
 
-        mask = self._erb_dec_sess.run(
-            None,
-            {
-                "emb": enc_out[idx["emb"]],
-                "e3": enc_out[idx["e3"]],
-                "e2": enc_out[idx["e2"]],
-                "e1": enc_out[idx["e1"]],
-                "e0": enc_out[idx["e0"]],
-            },
-        )[0]
-        spec_masked = spec_chunk[0] * (mask[0, 0] @ self._erb_inv_fb)
-
-        coefs_raw = self._df_dec_sess.run(
-            None, {"emb": enc_out[idx["emb"]], "c0": enc_out[idx["c0"]]}
-        )[0]
-        coefs = coefs_raw.reshape(1, S, _NB_DF, _DF_ORDER, 2).transpose(0, 3, 1, 2, 4)
-
-        spec_df = np.zeros((S, _NB_DF, 2), dtype=np.float32)
-        spec_df[:, :, 0] = spec_chunk[0, :, :_NB_DF].real
-        spec_df[:, :, 1] = spec_chunk[0, :, :_NB_DF].imag
-
-        pf = _DF_ORDER - 1
-        if prev_df_tail is not None and prev_df_tail.shape[0] == pf:
-            spec_df_p = np.concatenate([prev_df_tail, spec_df], axis=0)
-        else:
-            spec_df_p = np.pad(spec_df, ((pf, 0), (0, 0), (0, 0)))
-        next_df = spec_df[-pf:].copy()
-
-        win = np.lib.stride_tricks.sliding_window_view(
-            spec_df_p, _DF_ORDER, axis=0
-        ).transpose(0, 3, 1, 2)
-        c = coefs[0]
-        w = win.transpose(1, 0, 2, 3)
-        re = c[..., 0] * w[..., 0] - c[..., 1] * w[..., 1]
-        im = c[..., 1] * w[..., 0] + c[..., 0] * w[..., 1]
-
-        enhanced = spec_masked
-        enhanced[:, :_NB_DF] = re.sum(axis=0) + 1j * im.sum(axis=0)
-
-        # Attenuation limit — clamp the per-bin gain so the mask never
-        # suppresses below atten_lim_db (re-applied after DF post-filter
-        # since the DF output may differ from the raw ERB mask).
-        if self._apply_atten_lim:
-            gain = np.abs(enhanced) / (np.abs(spec_chunk[0]) + 1e-10)
-            gain_limited = np.maximum(gain, self._min_gain)
-            ratio = gain_limited / (gain + 1e-10)
-            enhanced = enhanced * ratio
-
-        return enhanced, next_df
-
-    def process_chunk(self, audio):
-        """Denoise a chunk of audio (32 frames = 5120 samples at 16 kHz).
-
-        The first chunk is processed standalone. Subsequent chunks prepend
-        warm-up frames from the previous chunk's tail so the GRU hidden
-        state is seeded by recent audio context, eliminating boundary
-        clicks.
-        """
-        if audio.ndim == 1:
-            audio = audio[np.newaxis, :]
-            audio_squeezed = True
-        else:
-            audio_squeezed = False
-
-        num_samples = audio.shape[1]
-        S = num_samples // _HOP_SIZE
-        if S != _CHUNK_FRAMES:
-            raise ValueError(
-                f"process_chunk requires {_CHUNK_FRAMES} frames, got {S} frames"
-            )
-
-        padded_len = S * _HOP_SIZE + _FFT_SIZE
-        if audio.shape[1] < padded_len:
-            audio_padded = np.pad(audio, ((0, 0), (0, padded_len - audio.shape[1])))
-        else:
-            audio_padded = audio[:, :padded_len]
-
-        spec = self._df.analysis(audio_padded, reset=True)
-        spec_model = spec[:, :S]
-
-        erb_feat = erb_norm(erb(spec_model, self._df.erb_widths()), self._alpha)
-        sf_feat = unit_norm(spec_model[..., :_NB_DF], self._alpha)
-
-        # Prepend warm-up frames if available. We use the raw spectrum from
-        # the previous chunk's tail so the GRU sees the actual audio context.
-        # The warmup frames are re-normalized within the current chunk's
-        # feature extraction call (necessary for consistent feature scaling).
-        if self._prev_tail is not None and self._prev_tail.shape[1] > 0:
-            W = min(self._prev_tail.shape[1], _WARMUP_FRAMES)
-            warmup_spec = self._prev_tail[:, -W:]
-            warmup_erb = erb_norm(erb(warmup_spec, self._df.erb_widths()), self._alpha)
-            warmup_sf = unit_norm(warmup_spec[..., :_NB_DF], self._alpha)
-
-            spec_batch = np.concatenate([warmup_spec, spec_model], axis=1)
-            erb_batch = np.concatenate([warmup_erb, erb_feat], axis=1)
-            sf_batch = np.concatenate([warmup_sf, sf_feat], axis=1)
-        else:
-            W = 0
-            spec_batch = spec_model
-            erb_batch = erb_feat
-            sf_batch = sf_feat
-
-        enhanced_batch, next_df = self._enhance_spectrum(
-            spec_batch,
-            erb_batch,
-            sf_batch,
-            prev_df_tail=self._prev_df_tail,
-        )
-        self._prev_df_tail = next_df
-        enhanced_model = enhanced_batch[W:]  # discard warm-up frames
-
-        # Save tail for next chunk
-        tail_len = _WARMUP_FRAMES
-        if self._prev_tail is None:
-            self._prev_tail = spec_model
-        else:
-            self._prev_tail = spec_model[:, -tail_len:]
-
-        # Build enhanced for synthesis.
-        # Always reset=True per chunk — each chunk is STFT-independent.
-        # Uses 33 frames (32 model + 1 zero tail) → 5280 samples.
-        # Delay comp removes 160 → 5120 output.
-        tail_frame = np.zeros((1, enhanced_model.shape[1]), dtype=np.complex64)
-        enhanced = np.concatenate([enhanced_model, tail_frame], axis=0)
-        audio_out = self._df.synthesis(
-            enhanced.astype(np.complex64)[np.newaxis, :, :], reset=True
-        )
-        delay = _FFT_SIZE - _HOP_SIZE
-        audio_out = audio_out[:, delay : delay + num_samples]
-
-        # Crossfade with previous chunk's tail to smooth STFT boundary
-        n_cf = self._crossfade_samples
-        if self._prev_output_tail is not None and n_cf > 0:
-            ramp = np.linspace(0, 1, n_cf, dtype=np.float32)
-            audio_out[0, :n_cf] = self._prev_output_tail * np.sqrt(
-                1 - ramp
-            ) + audio_out[0, :n_cf] * np.sqrt(ramp)
-        # Save tail for next chunk's crossfade
-        if n_cf > 0:
-            self._prev_output_tail = audio_out[0, -n_cf:].copy()
-
-        if audio_squeezed:
-            return audio_out[0]
-        return audio_out.reshape(audio.shape)
-
-    def reset_state(self):
-        """Reset warm-up and crossfade state for a new audio stream."""
-        self._prev_tail = None
-        self._prev_output_tail = None
-        self._prev_df_tail = None
-
-    def close(self):
+    def close(self) -> None:
         self._df = None
         self._enc_sess = None
         self._erb_dec_sess = None
         self._df_dec_sess = None
-        self._prev_tail = None
-        self._prev_output_tail = None
-        self._prev_df_tail = None
+        self._h_enc = None
+        self._h_erb_dec = None
+        self._h_df_dec = None
+        self._prev_df = None
+
+    # ------------------------------------------------------------------
+    # Per-frame processing
+    # ------------------------------------------------------------------
+
+    def process_frame(self, audio: np.ndarray) -> np.ndarray:
+        """Denoise a single 160-sample (10 ms) frame at 16 kHz.
+
+        The libdf analysis state, the encoder/decoder GRU hidden states, and
+        the DF filter polynomial history are all carried across calls.
+        """
+        if audio.ndim == 1:
+            audio = audio[np.newaxis, :]
+            squeezed = True
+        else:
+            squeezed = False
+
+        if audio.shape[1] != _FRAME_SAMPLES:
+            raise ValueError(
+                f"process_frame requires {_FRAME_SAMPLES} samples, got {audio.shape[1]}"
+            )
+
+        # ---- STFT (streaming) -----------------------------------------
+        # libdf.analysis(audio, reset=False) keeps the analysis filter
+        # state across calls. For 160 samples with FFT=320, it produces
+        # 1 frame.
+        spec_new = self._df.analysis(audio.astype(np.float32), reset=False)
+        # spec_new: (1, 1, 161) complex64
+
+        # ---- Feature extraction (per frame) ----------------------------
+        erb_feat = erb_norm(
+            erb(spec_new, self._df.erb_widths()), self._alpha
+        )  # (1, 1, 32)
+        sf_feat = unit_norm(spec_new[..., :_NB_DF], self._alpha)  # (1, 1, 64) complex
+
+        # ---- Encoder ----------------------------------------------------
+        # Single-frame input. The GRU hidden state carries context.
+        enc_out = self._enc_sess.run(
+            None,
+            {
+                "feat_erb": erb_feat[:, np.newaxis, :, :],
+                "feat_spec": np.stack([sf_feat.real, sf_feat.imag], axis=1),
+                "h_enc_in": self._h_enc,
+            },
+        )
+        e0, e1, e2, e3, emb, c0, _lsnr, self._h_enc = enc_out
+        # All outputs shape (1, 1, ...) for the single time step.
+
+        # ---- ERB decoder ------------------------------------------------
+        m, self._h_erb_dec = self._erb_dec_sess.run(
+            None,
+            {
+                "emb": emb,
+                "e3": e3,
+                "e2": e2,
+                "e1": e1,
+                "e0": e0,
+                "h_erb_dec_in": self._h_erb_dec,
+            },
+        )
+        # m: (1, 1, 1, 32) — gain mask per ERB band
+
+        # ---- DF decoder -------------------------------------------------
+        coefs, self._h_df_dec = self._df_dec_sess.run(
+            None,
+            {
+                "emb": emb,
+                "c0": c0,
+                "h_df_dec_in": self._h_df_dec,
+            },
+        )
+        # coefs: (1, 1, 64, 10) — DF filter per freq bin
+
+        # ---- Post-process spectrum --------------------------------------
+        spec_in = spec_new[0, 0]  # (161,) complex64
+        mask = m[0, 0, 0]  # (32,) float32
+        coef = coefs[0, 0]  # (64, 10) float32
+
+        # Project ERB mask to full spectrum.
+        spec_masked = spec_in * (mask @ self._erb_inv_fb)  # (161,) complex
+
+        # Build DF filter window. The 5-tap polynomial prediction needs
+        # 4 frames of "previous filter history" + the new frame.
+        # _prev_df holds the 4 frames of (real, imag) saved from the
+        # previous call's spec_df_p (or zeros on the first call).
+        spec_df_new = np.zeros((1, _NB_DF, 2), dtype=np.float32)
+        spec_df_new[0, :, 0] = spec_in[:_NB_DF].real
+        spec_df_new[0, :, 1] = spec_in[:_NB_DF].imag
+        spec_df_p = np.concatenate([self._prev_df, spec_df_new], axis=0)
+        # shape: (5, 64, 2)
+
+        # Save the last 4 frames for the next call.
+        self._prev_df = spec_df_p[-(_DF_ORDER - 1) :].copy()
+
+        # Apply the 5-tap complex FIR.
+        # coef from ONNX: (64, 10) = (F, O*2). PyTorch reference does
+        # coefs.permute(0, 2, 1, 3, 4) to put the order axis first →
+        # (B, T, O, F, 2). We need c with shape (O, F, 2).
+        c = coef.reshape(_NB_DF, _DF_ORDER, 2).transpose(1, 0, 2)
+        # spec_df_p: (5, 64, 2). y[f] = sum_t c[t, f, 0]*x[t, f, 0] - c[t, f, 1]*x[t, f, 1]
+        re = (c[..., 0] * spec_df_p[..., 0] - c[..., 1] * spec_df_p[..., 1]).sum(axis=0)
+        im = (c[..., 1] * spec_df_p[..., 0] + c[..., 0] * spec_df_p[..., 1]).sum(axis=0)
+
+        enhanced = spec_masked.copy()
+        enhanced[:_NB_DF] = re + 1j * im
+
+        # ---- Attenuation limit (linear blend, per reference) -----------
+        # Skip the multiply when atten_lim_db is 100 (no blending needed).
+        if self._lim > 0.0:
+            enhanced = spec_in * self._lim + enhanced * (1.0 - self._lim)
+
+        # ---- STFT synthesis (streaming) --------------------------------
+        # libdf.synthesis with 1 frame gives 160 samples with reset=False.
+        audio_out = self._df.synthesis(enhanced[np.newaxis, np.newaxis, :], reset=False)
+        # audio_out: (1, 160) float32
+
+        if squeezed:
+            return audio_out[0]
+        return audio_out.reshape(audio.shape)
