@@ -275,7 +275,7 @@ class HushSession:
         if self._prev_output_tail is not None and n_cf > 0:
             ramp = np.linspace(0, 1, n_cf, dtype=np.float32)
             audio_out[0, :n_cf] = (
-                self._prev_output_tail * (1 - ramp) + audio_out[0, :n_cf] * ramp
+                self._prev_output_tail * np.sqrt(1 - ramp) + audio_out[0, :n_cf] * np.sqrt(ramp)
             )
         # Save tail for next chunk's crossfade
         if n_cf > 0:
