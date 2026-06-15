@@ -178,11 +178,9 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
                 for f in flushed:
                     s = np.frombuffer(f.data, dtype=np.int16).astype(np.float32) / 32768.0
                     self._input_queue.append(s)
-                del self._downsampler
                 self._downsampler = None
             if self._upsampler is not None:
                 self._upsampler.flush()
-                del self._upsampler
                 self._upsampler = None
 
             self._native_rate = frame.sample_rate
@@ -333,10 +331,8 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
     def _close(self) -> None:
         self._enabled = False
         if self._downsampler is not None:
-            del self._downsampler
             self._downsampler = None
         if self._upsampler is not None:
-            del self._upsampler
             self._upsampler = None
         if self._session is not None:
             self._session.close()
