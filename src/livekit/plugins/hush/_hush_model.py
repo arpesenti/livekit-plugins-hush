@@ -92,6 +92,7 @@ class HushModel:
 
         self._enc_input_names = [i.name for i in self.enc_sess.get_inputs()]
         self._enc_output_names = [o.name for o in self.enc_sess.get_outputs() if o.name != "lsnr"]
+        self._enc_out_idx = {name: i for i, name in enumerate(self._enc_output_names)}
 
         # Warm-up
         S = _CHUNK_FRAMES
@@ -101,12 +102,12 @@ class HushModel:
             self._enc_input_names[0]: dummy_erb,
             self._enc_input_names[1]: dummy_spec,
         })
-        enc_dict = dict(zip(self._enc_output_names, enc_out))
+        idx = self._enc_out_idx
         self.erb_dec_sess.run(None, {
-            "emb": enc_dict["emb"], "e3": enc_dict["e3"], "e2": enc_dict["e2"],
-            "e1": enc_dict["e1"], "e0": enc_dict["e0"],
+            "emb": enc_out[idx["emb"]], "e3": enc_out[idx["e3"]], "e2": enc_out[idx["e2"]],
+            "e1": enc_out[idx["e1"]], "e0": enc_out[idx["e0"]],
         })
-        self.df_dec_sess.run(None, {"emb": enc_dict["emb"], "c0": enc_dict["c0"]})
+        self.df_dec_sess.run(None, {"emb": enc_out[idx["emb"]], "c0": enc_out[idx["c0"]]})
         logger.debug("Hush ONNX models warm-up complete")
 
 
@@ -121,7 +122,9 @@ class HushSession:
         self._enc_sess = model.enc_sess
         self._erb_dec_sess = model.erb_dec_sess
         self._df_dec_sess = model.df_dec_sess
+        self._enc_input_names = model._enc_input_names
         self._enc_output_names = model._enc_output_names
+        self._enc_out_idx = model._enc_out_idx
         self._erb_inv_fb = model.erb_inv_fb
         self._atten_lim_db = atten_lim_db
 
@@ -151,15 +154,15 @@ class HushSession:
             self._enc_input_names[0]: erb_chunk[:, np.newaxis, :, :],
             self._enc_input_names[1]: np.stack([sf_chunk.real, sf_chunk.imag], axis=1),
         })
-        enc = dict(zip(self._enc_output_names, enc_out))
+        idx = self._enc_out_idx
 
         mask = self._erb_dec_sess.run(None, {
-            "emb": enc["emb"], "e3": enc["e3"], "e2": enc["e2"],
-            "e1": enc["e1"], "e0": enc["e0"],
+            "emb": enc_out[idx["emb"]], "e3": enc_out[idx["e3"]], "e2": enc_out[idx["e2"]],
+            "e1": enc_out[idx["e1"]], "e0": enc_out[idx["e0"]],
         })[0]
         spec_masked = spec_chunk[0] * (mask[0, 0] @ self._erb_inv_fb)
 
-        coefs_raw = self._df_dec_sess.run(None, {"emb": enc["emb"], "c0": enc["c0"]})[0]
+        coefs_raw = self._df_dec_sess.run(None, {"emb": enc_out[idx["emb"]], "c0": enc_out[idx["c0"]]})[0]
         coefs = coefs_raw.reshape(1, S, _NB_DF, _DF_ORDER, 2).transpose(0, 3, 1, 2, 4)
 
         spec_df = np.zeros((S, _NB_DF, 2), dtype=np.float32)
