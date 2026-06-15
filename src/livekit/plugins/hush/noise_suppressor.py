@@ -176,7 +176,10 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
             if self._downsampler is not None:
                 flushed = self._downsampler.flush()
                 for f in flushed:
-                    s = np.frombuffer(f.data, dtype=np.int16).astype(np.float32) / 32768.0
+                    s = (
+                        np.frombuffer(f.data, dtype=np.int16).astype(np.float32)
+                        / 32768.0
+                    )
                     self._input_queue.append(s)
                 self._downsampler = None
             if self._upsampler is not None:

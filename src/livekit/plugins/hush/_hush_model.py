@@ -40,14 +40,23 @@ def _compute_alpha(sr, hop, tau):
 
 def _build_erb_inv_fb():
     n_freqs = _FFT_SIZE // 2 + 1
-    df_state = DF(sr=_SAMPLE_RATE, fft_size=_FFT_SIZE, hop_size=_HOP_SIZE,
-                  nb_bands=_NB_ERB, min_nb_erb_freqs=2)
+    df_state = DF(
+        sr=_SAMPLE_RATE,
+        fft_size=_FFT_SIZE,
+        hop_size=_HOP_SIZE,
+        nb_bands=_NB_ERB,
+        min_nb_erb_freqs=2,
+    )
     widths = np.asarray(df_state.erb_widths(), dtype=np.int64)
     if widths.sum() != n_freqs:
-        raise RuntimeError(f"libdf ERB widths sum to {widths.sum()}, expected {n_freqs}")
+        raise RuntimeError(
+            f"libdf ERB widths sum to {widths.sum()}, expected {n_freqs}"
+        )
     b_pts = np.cumsum(np.concatenate([[0], widths])).astype(int)[:-1]
     freqs = np.arange(n_freqs)
-    fb = ((freqs[:, None] >= b_pts) & (freqs[:, None] < b_pts + widths)).astype(np.float32)
+    fb = ((freqs[:, None] >= b_pts) & (freqs[:, None] < b_pts + widths)).astype(
+        np.float32
+    )
     return fb.T.copy()
 
 
@@ -84,35 +93,55 @@ class HushModel:
                     "Please ensure the sub-model files are present."
                 )
 
-        self.enc_sess = ort.InferenceSession(enc_path, providers=["CPUExecutionProvider"])
-        self.erb_dec_sess = ort.InferenceSession(erb_dec_path, providers=["CPUExecutionProvider"])
-        self.df_dec_sess = ort.InferenceSession(df_dec_path, providers=["CPUExecutionProvider"])
+        self.enc_sess = ort.InferenceSession(
+            enc_path, providers=["CPUExecutionProvider"]
+        )
+        self.erb_dec_sess = ort.InferenceSession(
+            erb_dec_path, providers=["CPUExecutionProvider"]
+        )
+        self.df_dec_sess = ort.InferenceSession(
+            df_dec_path, providers=["CPUExecutionProvider"]
+        )
         self.erb_inv_fb = _build_erb_inv_fb()
 
         self._enc_input_names = [i.name for i in self.enc_sess.get_inputs()]
-        self._enc_output_names = [o.name for o in self.enc_sess.get_outputs() if o.name != "lsnr"]
+        self._enc_output_names = [
+            o.name for o in self.enc_sess.get_outputs() if o.name != "lsnr"
+        ]
         self._enc_out_idx = {name: i for i, name in enumerate(self._enc_output_names)}
 
         # Warm-up
         S = _CHUNK_FRAMES
         dummy_erb = np.zeros((1, 1, S, _NB_ERB), dtype=np.float32)
         dummy_spec = np.zeros((1, 2, S, _NB_DF), dtype=np.float32)
-        enc_out = self.enc_sess.run(self._enc_output_names, {
-            self._enc_input_names[0]: dummy_erb,
-            self._enc_input_names[1]: dummy_spec,
-        })
+        enc_out = self.enc_sess.run(
+            self._enc_output_names,
+            {
+                self._enc_input_names[0]: dummy_erb,
+                self._enc_input_names[1]: dummy_spec,
+            },
+        )
         idx = self._enc_out_idx
-        self.erb_dec_sess.run(None, {
-            "emb": enc_out[idx["emb"]], "e3": enc_out[idx["e3"]], "e2": enc_out[idx["e2"]],
-            "e1": enc_out[idx["e1"]], "e0": enc_out[idx["e0"]],
-        })
-        self.df_dec_sess.run(None, {"emb": enc_out[idx["emb"]], "c0": enc_out[idx["c0"]]})
+        self.erb_dec_sess.run(
+            None,
+            {
+                "emb": enc_out[idx["emb"]],
+                "e3": enc_out[idx["e3"]],
+                "e2": enc_out[idx["e2"]],
+                "e1": enc_out[idx["e1"]],
+                "e0": enc_out[idx["e0"]],
+            },
+        )
+        self.df_dec_sess.run(
+            None, {"emb": enc_out[idx["emb"]], "c0": enc_out[idx["c0"]]}
+        )
         logger.debug("Hush ONNX models warm-up complete")
 
 
 # ------------------------------------------------------------------ #
 # Per-session state                                                   #
 # ------------------------------------------------------------------ #
+
 
 class HushSession:
     """Per-stream denoising session with overlapping-chunk GRU context."""
@@ -127,8 +156,13 @@ class HushSession:
         self._erb_inv_fb = model.erb_inv_fb
         self._atten_lim_db = atten_lim_db
 
-        self._df = DF(sr=_SAMPLE_RATE, fft_size=_FFT_SIZE, hop_size=_HOP_SIZE,
-                      nb_bands=_NB_ERB, min_nb_erb_freqs=2)
+        self._df = DF(
+            sr=_SAMPLE_RATE,
+            fft_size=_FFT_SIZE,
+            hop_size=_HOP_SIZE,
+            nb_bands=_NB_ERB,
+            min_nb_erb_freqs=2,
+        )
         self._alpha = _compute_alpha(_SAMPLE_RATE, _HOP_SIZE, _NORM_TAU)
 
         # Saved tail of the previous chunk for warm-up overlap
@@ -142,26 +176,38 @@ class HushSession:
         self._crossfade_samples = _HOP_SIZE  # 160 samples = 10ms
         self._prev_output_tail = None
 
-    def _enhance_spectrum(self, spec_chunk, erb_chunk, sf_chunk,
-                          prev_df_tail=None):
+    def _enhance_spectrum(self, spec_chunk, erb_chunk, sf_chunk, prev_df_tail=None):
         """Run the model on one batch of spectrum frames.
-        
+
         Returns (enhanced_spectrum, df_tail_for_next_chunk).
         """
         S = spec_chunk.shape[1]
-        enc_out = self._enc_sess.run(self._enc_output_names, {
-            self._enc_input_names[0]: erb_chunk[:, np.newaxis, :, :],
-            self._enc_input_names[1]: np.stack([sf_chunk.real, sf_chunk.imag], axis=1),
-        })
+        enc_out = self._enc_sess.run(
+            self._enc_output_names,
+            {
+                self._enc_input_names[0]: erb_chunk[:, np.newaxis, :, :],
+                self._enc_input_names[1]: np.stack(
+                    [sf_chunk.real, sf_chunk.imag], axis=1
+                ),
+            },
+        )
         idx = self._enc_out_idx
 
-        mask = self._erb_dec_sess.run(None, {
-            "emb": enc_out[idx["emb"]], "e3": enc_out[idx["e3"]], "e2": enc_out[idx["e2"]],
-            "e1": enc_out[idx["e1"]], "e0": enc_out[idx["e0"]],
-        })[0]
+        mask = self._erb_dec_sess.run(
+            None,
+            {
+                "emb": enc_out[idx["emb"]],
+                "e3": enc_out[idx["e3"]],
+                "e2": enc_out[idx["e2"]],
+                "e1": enc_out[idx["e1"]],
+                "e0": enc_out[idx["e0"]],
+            },
+        )[0]
         spec_masked = spec_chunk[0] * (mask[0, 0] @ self._erb_inv_fb)
 
-        coefs_raw = self._df_dec_sess.run(None, {"emb": enc_out[idx["emb"]], "c0": enc_out[idx["c0"]]})[0]
+        coefs_raw = self._df_dec_sess.run(
+            None, {"emb": enc_out[idx["emb"]], "c0": enc_out[idx["c0"]]}
+        )[0]
         coefs = coefs_raw.reshape(1, S, _NB_DF, _DF_ORDER, 2).transpose(0, 3, 1, 2, 4)
 
         spec_df = np.zeros((S, _NB_DF, 2), dtype=np.float32)
@@ -175,8 +221,11 @@ class HushSession:
             spec_df_p = np.pad(spec_df, ((pf, 0), (0, 0), (0, 0)))
         next_df = spec_df[-pf:].copy()
 
-        win = np.lib.stride_tricks.sliding_window_view(spec_df_p, _DF_ORDER, axis=0).transpose(0, 3, 1, 2)
-        c = coefs[0]; w = win.transpose(1, 0, 2, 3)
+        win = np.lib.stride_tricks.sliding_window_view(
+            spec_df_p, _DF_ORDER, axis=0
+        ).transpose(0, 3, 1, 2)
+        c = coefs[0]
+        w = win.transpose(1, 0, 2, 3)
         re = c[..., 0] * w[..., 0] - c[..., 1] * w[..., 1]
         im = c[..., 1] * w[..., 0] + c[..., 0] * w[..., 1]
 
@@ -248,7 +297,10 @@ class HushSession:
             sf_batch = sf_feat
 
         enhanced_batch, next_df = self._enhance_spectrum(
-            spec_batch, erb_batch, sf_batch, prev_df_tail=self._prev_df_tail,
+            spec_batch,
+            erb_batch,
+            sf_batch,
+            prev_df_tail=self._prev_df_tail,
         )
         self._prev_df_tail = next_df
         enhanced_model = enhanced_batch[W:]  # discard warm-up frames
@@ -276,9 +328,9 @@ class HushSession:
         n_cf = self._crossfade_samples
         if self._prev_output_tail is not None and n_cf > 0:
             ramp = np.linspace(0, 1, n_cf, dtype=np.float32)
-            audio_out[0, :n_cf] = (
-                self._prev_output_tail * np.sqrt(1 - ramp) + audio_out[0, :n_cf] * np.sqrt(ramp)
-            )
+            audio_out[0, :n_cf] = self._prev_output_tail * np.sqrt(
+                1 - ramp
+            ) + audio_out[0, :n_cf] * np.sqrt(ramp)
         # Save tail for next chunk's crossfade
         if n_cf > 0:
             self._prev_output_tail = audio_out[0, -n_cf:].copy()

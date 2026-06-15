@@ -133,7 +133,9 @@ def test_onnx_vs_pytorch() -> None:
 
     # Try a local sample file first, then fall back to Hush reference
     sample_paths = [
-        os.path.join(os.path.dirname(__file__), "..", "docs", "audio", "originals", "gym.wav"),
+        os.path.join(
+            os.path.dirname(__file__), "..", "docs", "audio", "originals", "gym.wav"
+        ),
         "/home/brains99/Hush/assets/audio/sample_00006_raw.wav",
     ]
     speech_path = None
@@ -148,17 +150,20 @@ def test_onnx_vs_pytorch() -> None:
         return
 
     with wave.open(speech_path, "rb") as wf:
-        speech_audio = np.frombuffer(
-            wf.readframes(wf.getnframes()), dtype=np.int16
-        ).astype(np.float32) / 32768.0
+        speech_audio = (
+            np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(
+                np.float32
+            )
+            / 32768.0
+        )
 
     # Take first chunk
     speech_chunk = speech_audio[: S * 160].copy()
-    speech_padded = np.pad(
-        speech_chunk[np.newaxis, :], ((0, 0), (0, 320))
-    )
+    speech_padded = np.pad(speech_chunk[np.newaxis, :], ((0, 0), (0, 320)))
 
-    df_speech = DF(sr=16000, fft_size=320, hop_size=160, nb_bands=32, min_nb_erb_freqs=2)
+    df_speech = DF(
+        sr=16000, fft_size=320, hop_size=160, nb_bands=32, min_nb_erb_freqs=2
+    )
     spec_sp = df_speech.analysis(speech_padded, reset=True)
     spec_sp = spec_sp[:, :S]
     erb_sp = erb_norm(erb(spec_sp, df_speech.erb_widths()), alpha)
@@ -198,8 +203,10 @@ def test_onnx_vs_pytorch() -> None:
         np.pad(enhanced_speech[np.newaxis, :], ((0, 0), (0, 320))), reset=True
     )
     word = os.path.basename(speech_path)
-    print(f"\nPASS: ONNX output matches PyTorch output "
-          f"(random RMS ratio={rms_ratio:.4f}, speech RMS ratio={rms_ratio_speech:.4f})")
+    print(
+        f"\nPASS: ONNX output matches PyTorch output "
+        f"(random RMS ratio={rms_ratio:.4f}, speech RMS ratio={rms_ratio_speech:.4f})"
+    )
 
     session.close()
     speech_session.close()

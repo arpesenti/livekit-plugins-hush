@@ -11,17 +11,31 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from livekit.plugins.hush._hush_model import (
-    HushModel, HushSession,
-    _SAMPLE_RATE, _FFT_SIZE, _HOP_SIZE, _NB_DF, _NB_ERB, _DF_ORDER,
-    _CHUNK_FRAMES, _CHUNK_SAMPLES,
-    _build_erb_inv_fb, _compute_alpha, _NORM_TAU,
+    HushModel,
+    HushSession,
+    _SAMPLE_RATE,
+    _FFT_SIZE,
+    _HOP_SIZE,
+    _NB_DF,
+    _NB_ERB,
+    _DF_ORDER,
+    _CHUNK_FRAMES,
+    _CHUNK_SAMPLES,
+    _build_erb_inv_fb,
+    _compute_alpha,
+    _NORM_TAU,
 )
 from libdf import DF, erb, erb_norm, unit_norm
 
 
 def read_wav(path):
     with wave.open(path, "rb") as wf:
-        nc, sw, sr, nf = wf.getnchannels(), wf.getsampwidth(), wf.getframerate(), wf.getnframes()
+        nc, sw, sr, nf = (
+            wf.getnchannels(),
+            wf.getsampwidth(),
+            wf.getframerate(),
+            wf.getnframes(),
+        )
         raw = wf.readframes(nf)
     if sw == 1:
         s = np.frombuffer(raw, np.uint8).astype(np.float32) / 255.0 * 2.0 - 1.0
@@ -38,24 +52,39 @@ def write_wav(path, samples, sr):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     i16 = np.clip(samples, -1.0, 1.0) * 32767.0
     with wave.open(path, "wb") as wf:
-        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
         wf.writeframes(i16.astype(np.int16).tobytes())
 
 
 def _model_chunk(spec_chunk, erb_chunk, sf_chunk, model, erb_inv_fb, prev_df):
     """Run one chunk through the model."""
-    enc_out = model.enc_sess.run(None, {
-        "feat_erb": erb_chunk[:, np.newaxis, :, :].astype(np.float32),
-        "feat_spec": np.stack([sf_chunk.real, sf_chunk.imag], axis=1).astype(np.float32),
-    })
+    enc_out = model.enc_sess.run(
+        None,
+        {
+            "feat_erb": erb_chunk[:, np.newaxis, :, :].astype(np.float32),
+            "feat_spec": np.stack([sf_chunk.real, sf_chunk.imag], axis=1).astype(
+                np.float32
+            ),
+        },
+    )
     enc = dict(zip(model._enc_output_names, enc_out))
-    mask = model.erb_dec_sess.run(None, {
-        "emb": enc["emb"], "e3": enc["e3"], "e2": enc["e2"],
-        "e1": enc["e1"], "e0": enc["e0"],
-    })[0]
+    mask = model.erb_dec_sess.run(
+        None,
+        {
+            "emb": enc["emb"],
+            "e3": enc["e3"],
+            "e2": enc["e2"],
+            "e1": enc["e1"],
+            "e0": enc["e0"],
+        },
+    )[0]
     spec_masked = spec_chunk[0] * (mask[0, 0] @ erb_inv_fb)
     coefs_raw = model.df_dec_sess.run(None, {"emb": enc["emb"], "c0": enc["c0"]})[0]
-    coefs = coefs_raw.reshape(1, _CHUNK_FRAMES, _NB_DF, _DF_ORDER, 2).transpose(0, 3, 1, 2, 4)
+    coefs = coefs_raw.reshape(1, _CHUNK_FRAMES, _NB_DF, _DF_ORDER, 2).transpose(
+        0, 3, 1, 2, 4
+    )
     spec_df = np.zeros((_CHUNK_FRAMES, _NB_DF, 2), dtype=np.float32)
     spec_cplx = spec_chunk[0]
     spec_df[:, :, 0] = spec_cplx[:, :_NB_DF].real
@@ -66,8 +95,11 @@ def _model_chunk(spec_chunk, erb_chunk, sf_chunk, model, erb_inv_fb, prev_df):
     else:
         spec_df_p = np.pad(spec_df, ((pf, 0), (0, 0), (0, 0)))
     next_df = spec_df[-pf:].copy()
-    win = np.lib.stride_tricks.sliding_window_view(spec_df_p, _DF_ORDER, axis=0).transpose(0, 3, 1, 2)
-    c = coefs[0]; w = win.transpose(1, 0, 2, 3)
+    win = np.lib.stride_tricks.sliding_window_view(
+        spec_df_p, _DF_ORDER, axis=0
+    ).transpose(0, 3, 1, 2)
+    c = coefs[0]
+    w = win.transpose(1, 0, 2, 3)
     re = c[..., 0] * w[..., 0] - c[..., 1] * w[..., 1]
     im = c[..., 1] * w[..., 0] + c[..., 0] * w[..., 1]
     enhanced = spec_masked.copy()
@@ -77,8 +109,13 @@ def _model_chunk(spec_chunk, erb_chunk, sf_chunk, model, erb_inv_fb, prev_df):
 
 def process_batch(audio, model, alpha, erb_inv_fb):
     """Full-file normalization + single model pass. Matches infer_single.py."""
-    df = DF(sr=_SAMPLE_RATE, fft_size=_FFT_SIZE, hop_size=_HOP_SIZE,
-            nb_bands=_NB_ERB, min_nb_erb_freqs=2)
+    df = DF(
+        sr=_SAMPLE_RATE,
+        fft_size=_FFT_SIZE,
+        hop_size=_HOP_SIZE,
+        nb_bands=_NB_ERB,
+        min_nb_erb_freqs=2,
+    )
     padded = np.pad(audio, (0, _FFT_SIZE)).astype(np.float32)
     spec_full = df.analysis(padded[np.newaxis, :], reset=True)
     spec_all = spec_full[:, :-1]  # all frames except the last tail frame
@@ -88,21 +125,38 @@ def process_batch(audio, model, alpha, erb_inv_fb):
 
     # Single forward pass through the model — GRU state is continuous
     # across all frames (exactly like infer_single.py).
-    enc_out = model.enc_sess.run(None, {
-        "feat_erb": erb_all[:, np.newaxis, :, :].astype(np.float32),
-        "feat_spec": np.stack([sf_all.real, sf_all.imag], axis=1).astype(np.float32),
-    })
+    enc_out = model.enc_sess.run(
+        None,
+        {
+            "feat_erb": erb_all[:, np.newaxis, :, :].astype(np.float32),
+            "feat_spec": np.stack([sf_all.real, sf_all.imag], axis=1).astype(
+                np.float32
+            ),
+        },
+    )
     enc = dict(zip(model._enc_output_names, enc_out))
 
-    mask = model.erb_dec_sess.run(None, {
-        "emb": enc["emb"], "e3": enc["e3"], "e2": enc["e2"],
-        "e1": enc["e1"], "e0": enc["e0"],
-    })[0]
+    mask = model.erb_dec_sess.run(
+        None,
+        {
+            "emb": enc["emb"],
+            "e3": enc["e3"],
+            "e2": enc["e2"],
+            "e1": enc["e1"],
+            "e0": enc["e0"],
+        },
+    )[0]
 
-    coefs_raw = model.df_dec_sess.run(None, {
-        "emb": enc["emb"], "c0": enc["c0"],
-    })[0]  # [1, n_frames, 64, 10]
-    coefs = coefs_raw.reshape(1, n_frames, _NB_DF, _DF_ORDER, 2).transpose(0, 3, 1, 2, 4)
+    coefs_raw = model.df_dec_sess.run(
+        None,
+        {
+            "emb": enc["emb"],
+            "c0": enc["c0"],
+        },
+    )[0]  # [1, n_frames, 64, 10]
+    coefs = coefs_raw.reshape(1, n_frames, _NB_DF, _DF_ORDER, 2).transpose(
+        0, 3, 1, 2, 4
+    )
 
     # Apply ERB mask (all frames at once)
     mask_proj = mask[0, 0] @ erb_inv_fb  # [n_frames, 32] @ [32, 161]
@@ -113,8 +167,11 @@ def process_batch(audio, model, alpha, erb_inv_fb):
     spec_df[:, :, 0] = spec_all[0, :, :_NB_DF].real
     spec_df[:, :, 1] = spec_all[0, :, :_NB_DF].imag
     spec_df_p = np.pad(spec_df, ((_DF_ORDER - 1, 0), (0, 0), (0, 0)))
-    win = np.lib.stride_tricks.sliding_window_view(spec_df_p, _DF_ORDER, axis=0).transpose(0, 3, 1, 2)
-    c = coefs[0]; w = win.transpose(1, 0, 2, 3)
+    win = np.lib.stride_tricks.sliding_window_view(
+        spec_df_p, _DF_ORDER, axis=0
+    ).transpose(0, 3, 1, 2)
+    c = coefs[0]
+    w = win.transpose(1, 0, 2, 3)
     re = c[..., 0] * w[..., 0] - c[..., 1] * w[..., 1]
     im = c[..., 1] * w[..., 0] + c[..., 0] * w[..., 1]
     enhanced = spec_masked.copy()
@@ -149,7 +206,9 @@ def process_stream(audio, model):
 def main():
     docs_dir = os.path.join(os.path.dirname(__file__), "..", "docs", "audio")
     originals_dir = os.path.join(docs_dir, "originals")
-    model_dir = os.path.join(os.path.dirname(__file__), "..", "src", "livekit", "plugins", "hush", "models")
+    model_dir = os.path.join(
+        os.path.dirname(__file__), "..", "src", "livekit", "plugins", "hush", "models"
+    )
 
     print("Loading Hush model...")
     model = HushModel(model_dir)
@@ -164,10 +223,16 @@ def main():
         if sr != _SAMPLE_RATE:
             raise ValueError(f"Expected {_SAMPLE_RATE} Hz, got {sr} Hz")
 
-        write_wav(os.path.join(docs_dir, f"hush-{fname.replace('.wav','')}.wav"),
-                  process_batch(audio_data, model, alpha, erb_inv_fb), _SAMPLE_RATE)
-        write_wav(os.path.join(docs_dir, f"hush-stream-{fname.replace('.wav','')}.wav"),
-                  process_stream(audio_data, model), _SAMPLE_RATE)
+        write_wav(
+            os.path.join(docs_dir, f"hush-{fname.replace('.wav', '')}.wav"),
+            process_batch(audio_data, model, alpha, erb_inv_fb),
+            _SAMPLE_RATE,
+        )
+        write_wav(
+            os.path.join(docs_dir, f"hush-stream-{fname.replace('.wav', '')}.wav"),
+            process_stream(audio_data, model),
+            _SAMPLE_RATE,
+        )
         print(f"  Done: {fname}")
 
     print("All files processed.")

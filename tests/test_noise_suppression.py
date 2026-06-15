@@ -338,7 +338,9 @@ class TestIntegration:
             samples = rng.uniform(-0.5, 0.5, 5120).astype(np.float32)
             frame = create_audio_frame(samples)
             result = ns._process(frame)
-            out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+            out = (
+                np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+            )
             outputs.append(out)
 
         for i, out in enumerate(outputs):
@@ -513,9 +515,12 @@ class TestCoverageGaps:
         )
         with wave.open(speech_path, "rb") as wf:
             n_frames = wf.getnframes()
-            speech = np.frombuffer(
-                wf.readframes(n_frames), dtype=np.int16
-            ).astype(np.float32) / 32768.0
+            speech = (
+                np.frombuffer(wf.readframes(n_frames), dtype=np.int16).astype(
+                    np.float32
+                )
+                / 32768.0
+            )
 
         # Process in streaming mode — the harder case
         model = HushModel()
@@ -530,7 +535,7 @@ class TestCoverageGaps:
                 chunk = np.pad(chunk, (0, chunk_samples - len(chunk)))
             denoised = session.process_chunk(chunk)
             n_out = min(len(denoised), end - pos)
-            output[pos:pos+n_out] = denoised[:n_out]
+            output[pos : pos + n_out] = denoised[:n_out]
             pos += chunk_samples
         session.close()
 
@@ -542,27 +547,23 @@ class TestCoverageGaps:
         # be aggressively suppressed — the model is designed to pass speech)
         assert out_rms > in_rms * 0.3, (
             f"Output too quiet: out_rms={out_rms:.4f} in_rms={in_rms:.4f} "
-            f"ratio={out_rms/in_rms:.3f}"
+            f"ratio={out_rms / in_rms:.3f}"
         )
 
         # No clipping artifacts
-        assert out_peak < 1.5, (
-            f"Output peak too high (clipping): {out_peak:.4f}"
-        )
+        assert out_peak < 1.5, f"Output peak too high (clipping): {out_peak:.4f}"
 
         # Positive correlation with input in speech regions
         chunk = 16000  # 1-second segments
         corrs = []
         for i in range(0, len(speech) - chunk, chunk):
-            seg_in = speech[i:i+chunk]
-            seg_out = output[i:i+chunk]
+            seg_in = speech[i : i + chunk]
+            seg_out = output[i : i + chunk]
             if np.sqrt(np.mean(seg_in**2)) > 0.01:
                 corrs.append(np.corrcoef(seg_in, seg_out)[0, 1])
 
         avg_corr = np.mean(corrs)
-        assert avg_corr > 0.0, (
-            f"Anti-correlated with input: avg_corr={avg_corr:.4f}"
-        )
+        assert avg_corr > 0.0, f"Anti-correlated with input: avg_corr={avg_corr:.4f}"
 
 
 if __name__ == "__main__":
