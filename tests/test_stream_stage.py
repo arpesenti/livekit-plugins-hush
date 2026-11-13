@@ -324,7 +324,7 @@ def test_no_silent_frames_inside_a_tone(rate, frame_ms):
 # ------------------------------------------------------------------ #
 
 
-@pytest.mark.parametrize("rate", (8000, 24000, 48000))
+@pytest.mark.parametrize("rate", (8000, 24000, 44100, 48000))
 def test_wet_and_dry_are_delayed_by_the_same_amount(rate):
     """The dry signal must sit at the same FIFO position as the model output."""
     rng = np.random.default_rng(3)
@@ -367,6 +367,34 @@ def test_inference_failure_emits_silence_and_is_counted(rate):
 
     assert stage.failures == stage.hops_processed > 0
     assert stage.underruns == 0
+
+
+def test_a_hop_processor_that_stops_producing_audio_trips_the_canary():
+    """Silence from the model must show up as an underrun, not as healthy output.
+
+    A real hop is always 160 samples; this models a converter/model path that
+    has stopped returning audio without raising. The frame contract still holds
+    (silence out), but the canary must fire once the prime is paid.
+    """
+
+    def empty(_hop):
+        return np.zeros(0, dtype=np.float32)
+
+    stage = _stage(8000, process_hop=empty)
+    for _ in range(20):
+        out = stage.push(np.full(400, 0.25, dtype=np.float32))
+        assert len(out) == 400
+        assert np.all(out == 0.0)
+
+    assert stage.prime_samples > stage.declared_delay_samples
+    assert stage.underruns > 0
+
+
+def test_empty_push_is_a_no_op():
+    stage = _stage(8000)
+    before = (stage.rate, stage.hops_processed, stage.prime_samples)
+    assert len(stage.push(np.zeros(0, dtype=np.float32))) == 0
+    assert (stage.rate, stage.hops_processed, stage.prime_samples) == before
 
 
 @pytest.mark.parametrize("rate", (24000, 44100, 48000))

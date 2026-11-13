@@ -299,6 +299,13 @@ class TestFrameProcessing:
         )
         assert ns.underruns == 0
 
+    def test_declared_delay_is_exposed_from_the_stage(self, mock_suppressor):
+        """The diagnostic reports the converter delay, not the measured prime."""
+        assert mock_suppressor.declared_delay_samples == 0
+        frame = create_audio_frame(np.zeros(480, dtype=np.float32), sample_rate=48000)
+        mock_suppressor._process(frame)
+        assert mock_suppressor.declared_delay_samples > 0
+
     def test_processing_failure_is_counted_and_silent(self, monkeypatch):
         """A failure outside a hop must not raise, and must not leak the input."""
         _patch_module(monkeypatch)

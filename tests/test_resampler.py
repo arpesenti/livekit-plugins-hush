@@ -91,6 +91,21 @@ def test_cumulative_output_count_is_the_rational_ratio(input_rate, output_rate, 
         )
 
 
+def test_input_contract():
+    """The converter is mono-only and rejects rates it cannot convert."""
+    with pytest.raises(ValueError, match="positive"):
+        PolyphaseResampler(0, 16000)
+    with pytest.raises(ValueError, match="positive"):
+        PolyphaseResampler(16000, -1)
+    with pytest.raises(ValueError, match="equal"):
+        PolyphaseResampler(16000, 16000)
+
+    resampler = PolyphaseResampler(48000, 16000)
+    assert len(resampler.push(np.zeros(0, dtype=np.float32))) == 0
+    with pytest.raises(ValueError, match="1-D"):
+        resampler.push(np.zeros((2, 160), dtype=np.float32))
+
+
 def test_44100_frames_keep_the_output_count_exact():
     """44.1 kHz is the non-integral ratio that would expose a rounding drift."""
     resampler = PolyphaseResampler(44100, 16000)
