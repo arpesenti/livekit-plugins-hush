@@ -1,9 +1,12 @@
 """Tests for Hush noise suppression plugin.
 
-Unit tests mock the ONNX model. Integration tests require the real model.
+Unit tests mock the ONNX model. Integration tests use the committed real model;
+locally they skip if it is unavailable, but CI requires them to run.
 
-Run: python -m pytest tests/ -v
+Run: uv run pytest
 """
+
+import os
 
 import numpy as np
 import pytest
@@ -401,14 +404,20 @@ def _model_available() -> bool:
 
         HushModel()
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 - any failure means the model is unavailable
         return False
 
 
-@pytest.mark.skipif(
-    not _model_available(),
-    reason="ONNX model not available",
+_MODEL_AVAILABLE = _model_available()
+# The weights are committed, so CI must fail rather than skip if they cannot load.
+_MODEL_REQUIRED = os.getenv("CI", "").lower() == "true"
+_skip_without_model = pytest.mark.skipif(
+    not _MODEL_AVAILABLE and not _MODEL_REQUIRED,
+    reason="ONNX model not available (skipped locally; required on CI)",
 )
+
+
+@_skip_without_model
 class TestIntegration:
     """Integration tests with the real Hush model."""
 
@@ -456,6 +465,15 @@ class TestIntegration:
         result = session.process_frame(rng.uniform(-0.5, 0.5, 160).astype(np.float32))
         assert len(result) == 160
         assert result.dtype == np.float32
+
+    def test_process_frame_after_close_raises(self):
+        """A closed session refuses further frames."""
+        from livekit.plugins.hush._hush_model import HushModel, HushSession
+
+        session = HushSession(HushModel())
+        session.close()
+        with pytest.raises(RuntimeError, match="HushSession is closed"):
+            session.process_frame(np.zeros(160, dtype=np.float32))
 
     def test_end_to_end_process(self):
         """End-to-end HushNoiseSuppressor._process with real model."""
@@ -727,10 +745,7 @@ class TestCoverageGaps:
         with pytest.raises(FileNotFoundError):
             HushModel(model_path="/nonexistent/path.onnx")
 
-    @pytest.mark.skipif(
-        not _model_available(),
-        reason="ONNX model not available",
-    )
+    @_skip_without_model
     def test_process_frame_2d_input(self):
         """Model handles 2D array input correctly."""
         from livekit.plugins.hush._hush_model import HushModel, HushSession
@@ -749,10 +764,7 @@ class TestCoverageGaps:
         assert out_2d.shape == (1, 160)
         np.testing.assert_array_almost_equal(out_1d, out_2d[0], decimal=4)
 
-    @pytest.mark.skipif(
-        not _model_available(),
-        reason="ONNX model not available",
-    )
+    @_skip_without_model
     def test_process_frame_wrong_size(self):
         """Audio with wrong frame size raises ValueError."""
         from livekit.plugins.hush._hush_model import HushModel, HushSession
@@ -905,13 +917,9 @@ class TestCoverageGaps:
 
         assert ns._session.frames_processed == 0
 
-    @pytest.mark.skipif(
-        not _model_available(),
-        reason="ONNX model not available",
-    )
+    @_skip_without_model
     def test_clean_speech_preservation(self):
         """Clean speech should pass through with minimal distortion."""
-        import os
         import wave
 
         from livekit.plugins.hush._hush_model import HushModel, HushSession

@@ -36,6 +36,7 @@ import numpy as np
 # Constants
 # ---------------------------------------------------------------------------
 
+
 # Vorbis window: sin(pi/2 * sin^2(pi*(n+0.5)/N)) — matches the libdf
 # `vorbis_window` function. Symmetric (length N), used for the STFT
 # with 50% overlap.
@@ -48,7 +49,7 @@ def _vorbis_window(N: int) -> np.ndarray:
 # Window normalization: 1 / (window_size^2 / (2 * frame_size))
 # = 2 * frame_size / window_size^2. Empirically verified against libdf.
 def _compute_wnorm(fft_size: int, hop_size: int) -> float:
-    return 1.0 / (fft_size ** 2 / (2.0 * hop_size))
+    return 1.0 / (fft_size**2 / (2.0 * hop_size))
 
 
 # ERB feature normalization constants (from libdf `MEAN_NORM_INIT`).
@@ -96,9 +97,7 @@ class DF:
         self._analysis_mem = np.zeros(fft_size - hop_size, dtype=np.float32)
         self._synthesis_mem = np.zeros(fft_size - hop_size, dtype=np.float32)
         # ERB filterbank widths, computed via the libdf algorithm.
-        self._erb_widths = _compute_erb_widths(
-            sr, fft_size, nb_bands, min_nb_erb_freqs
-        )
+        self._erb_widths = _compute_erb_widths(sr, fft_size, nb_bands, min_nb_erb_freqs)
         # EMA state for the per-band mean normalization (ERB features).
         # Per-channel, shape (C, nb_bands). Initialized lazily by
         # ``erb_norm`` (or by the first call that uses it).
@@ -129,15 +128,12 @@ class DF:
             self._analysis_mem[:] = 0
 
         if n_frames == 0:
-            return np.zeros(
-                (n_channels, 0, self.freq_bins), dtype=np.complex64
-            )
+            return np.zeros((n_channels, 0, self.freq_bins), dtype=np.complex64)
 
-        output = np.empty(
-            (n_channels, n_frames, self.freq_bins), dtype=np.complex64
-        )
+        output = np.empty((n_channels, n_frames, self.freq_bins), dtype=np.complex64)
         for ch in range(n_channels):
-            mem = self._analysis_mem.copy()
+            # Annotate for the narrower numpy stubs on Python 3.10.
+            mem: np.ndarray = self._analysis_mem.copy()
             for i in range(n_frames):
                 chunk = audio[ch, i * self.hop_size : (i + 1) * self.hop_size]
                 # Concatenate the previous context with the new input.
@@ -151,7 +147,7 @@ class DF:
                     mem = chunk.copy()
                 else:
                     # General case: shift left by hop_size, append new.
-                    mem = np.concatenate([mem[self.hop_size:], chunk])
+                    mem = np.concatenate([mem[self.hop_size :], chunk])
             # Persist the per-channel context back to the shared buffer.
             self._analysis_mem = mem
         return output
@@ -174,7 +170,8 @@ class DF:
 
         output = np.empty((n_channels, out_samples), dtype=np.float32)
         for ch in range(n_channels):
-            mem = self._synthesis_mem.copy()
+            # Annotate for the narrower numpy stubs on Python 3.10.
+            mem: np.ndarray = self._synthesis_mem.copy()
             for i in range(n_frames):
                 # IFFT to time domain. N is built into the spec.
                 x = np.fft.irfft(spec[ch, i], n=self.fft_size).astype(np.float32)

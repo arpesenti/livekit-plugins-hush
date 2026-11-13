@@ -205,7 +205,7 @@ class HushSession:
 
         # libdf state — runs in streaming mode (reset=False) so the
         # analysis/synthesis filter state is carried across frames.
-        self._df = DF(
+        self._df: DF | None = DF(
             sr=_SAMPLE_RATE,
             fft_size=_FFT_SIZE,
             hop_size=_HOP_SIZE,
@@ -291,27 +291,33 @@ class HushSession:
                 f"process_frame requires {_FRAME_SAMPLES} samples, got {audio.shape[1]}"
             )
 
+        # `_df is None` is the closed sentinel; the other references released
+        # by close() are unreachable once this guard fires.
+        df = self._df
+        if df is None:
+            raise RuntimeError("HushSession is closed")
+
         # ---- STFT (streaming) -----------------------------------------
         # libdf.analysis(audio, reset=False) keeps the analysis filter
         # state across calls. For 160 samples with FFT=320, it produces
         # 1 frame.
         if audio.dtype is np.float32:
-            spec_new = self._df.analysis(audio, reset=False)
+            spec_new = df.analysis(audio, reset=False)
         else:
-            spec_new = self._df.analysis(audio.astype(np.float32), reset=False)
+            spec_new = df.analysis(audio.astype(np.float32), reset=False)
         # spec_new: (1, 1, 161) complex64
 
         # ---- Feature extraction (per frame) ----------------------------
         # The DF class owns the EMA state for both normalizations
         # (matches libdf's in-place semantics). On a fresh session
         # the state is None and gets initialized to the libdf defaults.
-        erb_feat, self._df._erb_norm_state = erb_norm(
-            erb(spec_new, self._df.erb_widths()),
+        erb_feat, df._erb_norm_state = erb_norm(
+            erb(spec_new, df.erb_widths()),
             self._alpha,
-            self._df._erb_norm_state,
+            df._erb_norm_state,
         )  # (1, 1, 32)
-        sf_feat, self._df._unit_norm_state = unit_norm(
-            spec_new[..., :_NB_DF].copy(), self._alpha, self._df._unit_norm_state
+        sf_feat, df._unit_norm_state = unit_norm(
+            spec_new[..., :_NB_DF].copy(), self._alpha, df._unit_norm_state
         )  # (1, 1, 64) complex
 
         # ---- Encoder ----------------------------------------------------
@@ -385,8 +391,12 @@ class HushSession:
         # (B, T, O, F, 2). We need c with shape (O, F, 2).
         c = coef.reshape(_NB_DF, _DF_ORDER, 2).transpose(1, 0, 2)
         # spec_df_p: (5, 64, 2). y[f] = sum_t c[t, f, 0]*x[t, f, 0] - c[t, f, 1]*x[t, f, 1]
-        re = (c[..., 0] * self._spec_df_p[..., 0] - c[..., 1] * self._spec_df_p[..., 1]).sum(axis=0)
-        im = (c[..., 1] * self._spec_df_p[..., 0] + c[..., 0] * self._spec_df_p[..., 1]).sum(axis=0)
+        re = (
+            c[..., 0] * self._spec_df_p[..., 0] - c[..., 1] * self._spec_df_p[..., 1]
+        ).sum(axis=0)
+        im = (
+            c[..., 1] * self._spec_df_p[..., 0] + c[..., 0] * self._spec_df_p[..., 1]
+        ).sum(axis=0)
 
         # Write the DF output directly into spec_masked (no extra copy).
         spec_masked[:_NB_DF] = re + 1j * im
@@ -399,7 +409,7 @@ class HushSession:
 
         # ---- STFT synthesis (streaming) --------------------------------
         # libdf.synthesis with 1 frame gives 160 samples with reset=False.
-        audio_out = self._df.synthesis(enhanced[np.newaxis, np.newaxis, :], reset=False)
+        audio_out = df.synthesis(enhanced[np.newaxis, np.newaxis, :], reset=False)
         # audio_out: (1, 160) float32
 
         if squeezed:

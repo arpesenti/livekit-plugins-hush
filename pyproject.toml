@@ -41,5 +41,11 @@ where = ["src"]
 
 [dependency-groups]
 dev = [
+    "mypy>=2.4.1",
     "pytest>=9.1.0",
+    "ruff>=0.17.5",
 ]
+
+[tool.ruff.lint]
+# Keep the blind-except check on even if a future ruff narrows its defaults.
+extend-select = ["BLE"]

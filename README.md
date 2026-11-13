@@ -1,5 +1,7 @@
 # livekit-plugins-hush
 
+[![CI](https://github.com/arpesenti/livekit-plugins-hush/actions/workflows/ci.yml/badge.svg)](https://github.com/arpesenti/livekit-plugins-hush/actions/workflows/ci.yml)
+
 [LiveKit](https://livekit.io) noise suppression plugin using the [Hush](https://github.com/pulp-vision/Hush) speech enhancement model. Self-hosted, in-process, no cloud API.
 
 Hush is built on [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) with an auxiliary separation head for background speaker suppression. Inference uses a pure-numpy DSP frontend for STFT/ERB feature extraction and [ONNX Runtime](https://onnxruntime.ai) for the neural network. No PyTorch, no Rust toolchain, no prebuilt mystery binaries.
@@ -181,6 +183,31 @@ Noisy originals and their Hush-denoised counterparts are in `docs/audio/`. The d
 | [`krisp-original.wav`](docs/audio/originals/krisp-original.wav) | [`hush-krisp-original.wav`](docs/audio/hush-krisp-original.wav) |
 | [`noproblem_raw.wav`](docs/audio/originals/noproblem_raw.wav) | [`hush-noproblem_raw.wav`](docs/audio/hush-noproblem_raw.wav) |
 | [`taxi-sample.wav`](docs/audio/originals/taxi-sample.wav) | [`hush-taxi-sample.wav`](docs/audio/hush-taxi-sample.wav) |
+
+---
+
+## Development
+
+CI runs the same checks on Python 3.10 and 3.13. `.python-version` pins the default local
+interpreter to 3.13, so these commands go from clone to green on a clean checkout:
+
+```
+git clone https://github.com/arpesenti/livekit-plugins-hush.git
+cd livekit-plugins-hush
+uv sync --locked
+uv run pytest
+```
+
+The integration tests use the ONNX weights committed under `src/livekit/plugins/hush/models/`,
+so there is no model download and nothing is skipped.
+
+Run the same lint, formatting and type checks as CI:
+
+```
+uv run ruff check src tests
+uv run ruff format --check src tests
+uv run mypy src --ignore-missing-imports
+```
 
 ---
 
