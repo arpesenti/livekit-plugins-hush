@@ -15,6 +15,7 @@ import pytest
 
 from livekit.plugins.hush.noise_suppressor import (
     _FRAME_SAMPLES,
+    _SAMPLE_RATE,
     _measure_backlog,
     _StreamStage,
 )
@@ -83,6 +84,26 @@ def test_output_length_always_equals_input(rate, chunk):
     assert emitted == pushed
 
 
+@pytest.mark.parametrize("rate", (8000, 16000, 48000))
+def test_no_audio_is_lost_from_a_live_stream(rate):
+    """Totals balance on real audio, and nothing after the prime is silent."""
+    stage = _stage(rate)
+    n = int(rate * 0.010)
+    rng = np.random.default_rng(0)
+    outputs, pushed = [], 0
+    for _ in range(300):
+        block = (rng.standard_normal(n) * 0.1).astype(np.float32)
+        pushed += n
+        outputs.append(stage.push(block))
+
+    assert sum(len(out) for out in outputs) == pushed
+    prime_frames = stage.prime_samples // n
+    after = outputs[prime_frames:]
+    silent = [i for i, out in enumerate(after) if not np.any(out != 0.0)]
+    assert silent == [], f"silent frames after the prime: {silent[:5]}"
+    assert stage.underruns == 0
+
+
 # ------------------------------------------------------------------ #
 # Nothing is kept and never returned                                 #
 # ------------------------------------------------------------------ #
@@ -101,21 +122,6 @@ def test_fifo_occupancy_does_not_grow_over_the_stream(rate):
 
     # The FIFO swings with the converters burst, but it never accumulates.
     assert peak <= stage.backlog_samples + 2 * n, f"FIFO grew: peak={peak}"
-
-
-@pytest.mark.parametrize("rate", (8000, 24000))
-def test_owed_audio_settles_at_the_prime(rate):
-    """The silence handed back mirrors the audio still inside the stage."""
-    stage = _stage(rate)
-    n = int(rate * 0.010)
-    rng = np.random.default_rng(0)
-    for _ in range(600):
-        stage.push((rng.standard_normal(n) * 0.1).astype(np.float32))
-
-    assert stage.owed_samples > 0
-    # Settled: what is owed is the prime, plus at most the frame of rounding.
-    assert stage.owed_samples <= stage.startup_fill_samples + 2 * n
-    assert stage.owed_samples >= stage.startup_fill_samples - 2 * n
 
 
 @pytest.mark.parametrize("rate", RATES)
@@ -140,13 +146,36 @@ def test_backlog_is_zero_at_native_rate_and_measured_otherwise():
         assert _measure_backlog(rate) > 0
 
 
+@pytest.mark.parametrize(
+    "rate,need",
+    (
+        (16000, 441),  # 441 % 160 != 0: the 16 kHz remainder arm
+        (8000, 100),  # 100 % 80 != 0
+        (48000, 336),  # 336 % 480 != 0
+    ),
+)
+def test_prime_grows_by_a_hop_when_frames_do_not_fit_hops(rate, need):
+    """A frame that is not a whole number of hops leaves a remainder to cover."""
+    stage = _stage(rate)
+    rng = np.random.default_rng(0)
+    for _ in range(400):
+        stage.push((rng.standard_normal(need) * 0.1).astype(np.float32))
+
+    hop_native = _FRAME_SAMPLES * rate // _SAMPLE_RATE
+    assert need % hop_native != 0
+    backlog = _measure_backlog(rate)
+    target = (backlog + hop_native + hop_native) if backlog else hop_native
+    assert target <= stage.prime_samples < target + need
+    assert stage.underruns == 0
+
+
 @pytest.mark.parametrize("rate", RATES)
 @pytest.mark.parametrize("frame_ms", FRAME_MS)
 def test_prime_is_backlog_plus_at_most_one_frame(rate, frame_ms):
     """The prime is exactly the measured backlog plus rounding — no more, no less."""
     stage, _ = _feed(rate, frame_ms)
     need = int(rate * frame_ms / 1000)
-    hop_native = _FRAME_SAMPLES * rate // 16000
+    hop_native = _FRAME_SAMPLES * rate // _SAMPLE_RATE
 
     backlog = _measure_backlog(rate)
     remainder = hop_native if need % hop_native else 0
@@ -156,14 +185,14 @@ def test_prime_is_backlog_plus_at_most_one_frame(rate, frame_ms):
         target = remainder  # 16 kHz: no converter, only the 16 kHz remainder
 
     # Priming stops on the first whole frame at or past the target.
-    assert target <= stage.startup_fill_samples < target + need
+    assert target <= stage.prime_samples < target + need
 
 
 @pytest.mark.parametrize("rate,frame_ms", ((8000, 10), (24000, 10), (48000, 50)))
 def test_prime_frames_are_silence_and_then_audio_starts(rate, frame_ms):
     stage, frames = _feed(rate, frame_ms)
     need = int(rate * frame_ms / 1000)
-    prime_frames = stage.startup_fill_samples // need
+    prime_frames = stage.prime_samples // need
     assert prime_frames > 0
     for i, (_, out) in enumerate(frames):
         if i < prime_frames:
@@ -173,7 +202,7 @@ def test_prime_frames_are_silence_and_then_audio_starts(rate, frame_ms):
 
 def test_16k_needs_no_prime():
     stage, frames = _feed(16000, 10)
-    assert stage.startup_fill_samples == 0
+    assert stage.prime_samples == 0
     # The very first frame is already model output, not silence and not input.
     first_in, first_out = frames[0]
     np.testing.assert_array_almost_equal(first_out, first_in * 0.5, decimal=2)
@@ -258,7 +287,7 @@ def test_inference_failure_emits_silence_and_is_counted(rate):
             "a failed hop must not fall back to the input"
         )
 
-    assert stage.model_failures == stage.hops_processed > 0
+    assert stage.failures == stage.hops_processed > 0
     assert stage.underruns == 0
 
 
@@ -267,7 +296,7 @@ def test_rate_change_reprimes_instead_of_replaying(rate):
     stage = _stage(8000)
     for _ in range(100):
         stage.push(np.full(80, 0.25, dtype=np.float32))
-    assert stage.startup_fill_samples > 0
+    assert stage.prime_samples > 0
 
     stage.rebuild(rate)
     out = stage.push(np.full(int(rate * 0.010), 0.25, dtype=np.float32))

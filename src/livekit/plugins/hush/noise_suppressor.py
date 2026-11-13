@@ -227,14 +227,13 @@ class _StreamStage:
         self._backlog = 0
         # How much of this stream's prime has been emitted. Separate from the
         # lifetime counter below: the gate must go back to 0 on reset.
-        self._prime_filled = 0
+        self._prime_gate = 0
 
         # Counters. Never reset: they describe the lifetime of the stream.
         self.hops_processed = 0
-        self.owed_samples = 0  # audio accepted but not yet handed back
-        self.startup_fill_samples = 0  # the prime, part of what was owed
+        self.prime_samples = 0  # silence emitted while the converters filled
         self.underruns = 0  # unexpected: must stay 0 in steady state
-        self.model_failures = 0
+        self.failures = 0  # inference or processing failures, answered with silence
 
     @property
     def rate(self) -> int:
@@ -262,7 +261,7 @@ class _StreamStage:
         self._up = None
         self._rate = 0
         self._backlog = 0
-        self._prime_filled = 0
+        self._prime_gate = 0
         self._debug_hop_count = 0
 
     def rebuild(self, rate: int) -> None:
@@ -303,12 +302,11 @@ class _StreamStage:
         self._flush_wet()
 
         # 4. prime, then deliver exactly what arrived
-        if self._prime_filled < self._prime_target(need):
+        if self._prime_gate < self._prime_target(need):
             # The converters are still filling. Nothing buffered is consumed,
             # so every sample arrives late — none is lost, none is bypassed.
-            self._prime_filled += need
-            self.startup_fill_samples += need
-            self.owed_samples += need
+            self._prime_gate += need
+            self.prime_samples += need
             return np.zeros(need, dtype=np.float32)
 
         if len(self._out_q) < need:
@@ -318,20 +316,22 @@ class _StreamStage:
         self._out_q.popleft(need)
         return out
 
+    def record_failure(self, what: str) -> None:
+        """Count a failure of `what` and say so once; the caller emits silence.
+
+        The host's own fallback is to hand the raw frame downstream, so a
+        failure must never become a leak. It is also never silent to operators:
+        the counter stays visible even though only the first one logs.
+        """
+        self.failures += 1
+        if self.failures == 1:
+            logger.exception("Hush %s failed; emitting silence", what)
+
     def _run_hop(self, hop: np.ndarray) -> np.ndarray:
         try:
             out = self._process_hop(hop)
-        except Exception:
-            # The host's own fallback is to hand the raw frame downstream, so
-            # never let an inference failure become a leak: keep the clock
-            # honest with silence and surface it in the counters.
-            self.model_failures += 1
-            if self.model_failures == 1:
-                logger.exception(
-                    "Hush inference failed; emitting silence for this hop "
-                    "(failures=%d)",
-                    self.model_failures,
-                )
+        except Exception:  # noqa: BLE001 - ADR-0001: silence, never a leak
+            self.record_failure("inference")
             out = np.zeros(_FRAME_SAMPLES, dtype=np.float32)
 
         self.hops_processed += 1
@@ -386,7 +386,6 @@ class _StreamStage:
         return self._backlog + hop_native + remainder
 
     def _on_shortfall(self, need: int) -> np.ndarray:
-        self.owed_samples += need
         self.underruns += 1
         if self.underruns == 1:
             logger.warning(
@@ -429,7 +428,6 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
             process_hop=self._process_hop,
             debug_logging=debug_logging,
         )
-        self._unexpected_failures = 0
 
         self._enabled = True
 
@@ -457,9 +455,9 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         return self._stage.hops_processed
 
     @property
-    def startup_fill_samples(self) -> int:
-        """Samples of priming silence emitted at the head of the stream."""
-        return self._stage.startup_fill_samples
+    def prime_samples(self) -> int:
+        """Silence emitted while the converters filled, across this instance."""
+        return self._stage.prime_samples
 
     @property
     def underruns(self) -> int:
@@ -467,23 +465,14 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         return self._stage.underruns
 
     @property
-    def model_failures(self) -> int:
-        """Hops where inference raised and silence was substituted."""
-        return self._stage.model_failures
+    def failures(self) -> int:
+        """Inference or processing failures, each answered with silence."""
+        return self._stage.failures
 
     @property
-    def owed_samples(self) -> int:
-        """Audio accepted but not yet handed back, in samples.
-
-        A frame is always answered with a frame, so the stage hands back silence
-        in place of audio that has not cleared the converters yet. That silence
-        is a running total of what it still owes: at any instant it equals the
-        audio in the hop queue, the blend queue, both converters and the output
-        FIFO. It is also exactly the tail a closing stream discards, and it must
-        settle at the prime — a value that kept climbing would mean the stage
-        was swallowing audio it never returns.
-        """
-        return self._stage.owed_samples
+    def pending_output_samples(self) -> int:
+        """Samples sitting in the output FIFO — dropped when the stream closes."""
+        return self._stage.pending_output_samples
 
     def _on_stream_info_updated(
         self,
@@ -508,13 +497,11 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
 
         try:
             return self._enhance(frame)
-        except Exception:
+        except Exception:  # noqa: BLE001 - ADR-0001: silence, never a leak
             # A raising _process is a leak by another route: the host's own
             # fallback hands the raw frame downstream. Silence keeps the clock
             # and the no-leak guarantee, and the traceback names the fault.
-            self._unexpected_failures += 1
-            if self._unexpected_failures == 1:
-                logger.exception("Hush processing failed; emitting silence")
+            self._stage.record_failure("processing")
             return _silence_like(frame)
 
     def _enhance(self, frame: rtc.AudioFrame) -> rtc.AudioFrame:
@@ -540,7 +527,7 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
 
     def _close(self) -> None:
         self._enabled = False
-        pending = self._stage.owed_samples
+        pending = self._stage.pending_output_samples
         if pending:
             logger.debug("closing Hush stream, discarding %d buffered samples", pending)
         self._stage.reset()

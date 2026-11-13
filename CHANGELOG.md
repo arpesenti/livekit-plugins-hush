@@ -24,19 +24,25 @@
 - **`strength=0` and `enabled=False` are now true cheap bypasses**: the frame is
   returned untouched with no inference and no resampling. Previously
   `strength=0` still ran the full model.
-- **An inference failure no longer leaks.** `_process` never raises, so the
-  host cannot fall back to handing the raw frame downstream; a failed hop
-  emits silence and is counted.
+- **A failure no longer leaks.** `_process` never raises, so the host cannot
+  fall back to handing the raw frame downstream: a failed hop, or a
+  processing failure anywhere in the enhanced path, emits silence and bumps
+  `failures`.
+- **A pause re-primes.** Toggling `enabled` back on clears the buffers and the
+  DF history rather than replaying audio the consumer never heard — the
+  per-stream prime gate and the lifetime counter are now separate, which is
+  what made a second stream start from an empty pipeline.
 - **Rate changes and stream changes re-prime** instead of delivering the
   previous stream's buffered audio.
 
 **Added:**
 
 - Read-only diagnostics on `HushNoiseSuppressor`: `hops_processed`,
-  `startup_fill_samples`, `owed_samples`, `underruns`, `model_failures`.
+  `prime_samples`, `underruns`, `failures`, `pending_output_samples`.
   `underruns` should stay 0 — it is the canary for a converter change
-  breaking the prime. `owed_samples` is the audio accepted but not yet handed
-  back, which is also exactly the tail a closing stream drops.
+  breaking the prime. `pending_output_samples` is the tail a closing stream
+  drops (converter state beyond the FIFO also goes, but it is bounded by the
+  prime, which `prime_samples` measures).
 
 **Changed:**
 

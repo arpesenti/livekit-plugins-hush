@@ -51,8 +51,10 @@ fallback is to yield the raw frame.
   This is larger than the 33–108 ms one converter's backlog suggested, because the two
   converters in series each hold a burst back. It is the price of never leaking or dropping; the
   only way to cut it materially is the in-repo resampler below.
-- The first ≤ prime samples of every stream are silence, and a rate change or participant switch
-  re-primes (a fresh silence gap).
+- The first ≤ prime samples of every stream are silence, and a rate change, a participant switch
+  or a pause (`enabled` off then on) re-primes — a fresh silence gap, and in the pause case a
+  fresh DF history too, because the audio buffered from before the pause belongs to a moment the
+  consumer never heard.
 - Up to one prime's worth of tail audio is dropped at `_close()`; there is no channel to deliver
   it.
 - The defect is invisible at 16 kHz and at 50 ms frames above 16 kHz, so regression tests must

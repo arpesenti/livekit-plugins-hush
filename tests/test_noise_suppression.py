@@ -114,7 +114,7 @@ class TestFrameProcessing:
         # A hop of lead is primed before delivery starts, then the model fills.
         second = rng.uniform(-0.5, 0.5, 80).astype(np.float32)
         mock_suppressor._process(create_audio_frame(second))
-        assert mock_suppressor.startup_fill_samples == 2 * 80
+        assert mock_suppressor.prime_samples == 2 * 80
 
         third = rng.uniform(-0.5, 0.5, 80).astype(np.float32)
         result = mock_suppressor._process(create_audio_frame(third))
@@ -243,7 +243,7 @@ class TestFrameProcessing:
 
         assert result is frame
         assert ns.hops_processed == 0
-        assert ns.startup_fill_samples == 0
+        assert ns.prime_samples == 0
         assert ns._stage.rate == 0, "a bypass must not even build a converter"
 
     def test_reenabling_does_not_replay_stale_audio(self, monkeypatch):
@@ -292,6 +292,26 @@ class TestFrameProcessing:
         )
         assert ns.underruns == 0
 
+    def test_processing_failure_is_counted_and_silent(self, monkeypatch):
+        """A failure outside a hop must not raise, and must not leak the input."""
+        _patch_module(monkeypatch)
+        import livekit.plugins.hush.noise_suppressor as ns_module
+
+        ns = ns_module.HushNoiseSuppressor(strength=1.0)
+        monkeypatch.setattr(
+            ns._stage,
+            "rebuild",
+            lambda rate: (_ for _ in ()).throw(RuntimeError("nope")),
+        )
+
+        samples = np.full(160, 0.3, dtype=np.float32)
+        result = ns._process(create_audio_frame(samples))
+
+        out = frame_to_float(result)
+        assert np.all(out == 0.0), "a failure must emit silence, never the input"
+        assert ns.failures == 1
+        assert ns.underruns == 0
+
     def test_close_discards_buffered_audio(self, monkeypatch, caplog):
         """The tail has nowhere to go at close; it is dropped, reported and freed."""
         _patch_module(monkeypatch)
@@ -305,17 +325,16 @@ class TestFrameProcessing:
                     rng.uniform(-0.5, 0.5, 80).astype(np.float32), sample_rate=8000
                 )
             )
-        owed = ns.owed_samples
-        assert owed > 0
+        pending = ns.pending_output_samples
+        assert pending > 0
 
         caplog.set_level("DEBUG", logger="livekit.plugins.hush.noise_suppressor")
         ns._close()
 
         assert "discarding" in caplog.text
-        # The buffers are gone even though the counter stays as history.
-        assert ns._stage.pending_output_samples == 0
+        assert str(pending) in caplog.text, "the log should name the real tail"
+        assert ns.pending_output_samples == 0
         assert ns._stage.rate == 0
-        assert str(owed) in caplog.text
 
     def test_stream_tail_is_bounded_by_the_prime(self, monkeypatch):
         """Everything accepted is delivered, bar at most one prime's worth of tail."""
@@ -330,11 +349,11 @@ class TestFrameProcessing:
             )
             outputs.append(frame_to_float(ns._process(frame)))
 
-        prime = ns.startup_fill_samples
+        prime = ns.prime_samples
         assert prime > 0
-        # The tail is the audio still inside the stage when the stream ends: it
-        # mirrors the silence already handed back and never exceeds the prime.
-        assert 0 < ns.owed_samples <= prime
+        # What is still inside the stage when the stream ends is bounded by the
+        # prime: the FIFO holds a burst, the converters hold the rest.
+        assert ns.pending_output_samples <= prime
 
         # Nothing was dropped mid-stream: after priming, every frame carries the
         # model's 0.5x of the 0.4 input.
@@ -554,9 +573,7 @@ class TestIntegration:
             result = ns._process(frame)
             assert result is not frame, "still a fresh frame, even at 0 dB"
             source.append(samples)
-            enhanced.append(
-                np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
-            )
+            enhanced.append(frame_to_float(result))
         assert ns.hops_processed == 50
         ns._close()
 
@@ -699,7 +716,7 @@ class TestCoverageGaps:
             assert len(out) == 160
             np.testing.assert_array_almost_equal(out, samples * 0.5, decimal=3)
 
-        assert ns.startup_fill_samples == 0
+        assert ns.prime_samples == 0
         assert ns.hops_processed == 3
         assert ns.underruns == 0
 
