@@ -46,6 +46,9 @@
 
 **Changed:**
 
+- **Python 3.10 is no longer supported.** 3.10 reached end of life in
+  October 2026; `requires-python` is now `>=3.11` and CI covers every
+  supported minor from 3.11 through 3.14.
 - **Added delay.** Non-16 kHz input now has a constant, deterministic delay
   instead of an intermittent leak: 120–200 ms at 24–48 kHz and 240–300 ms
   at 8 kHz, depending on frame size. 16 kHz is unchanged (no delay, no

@@ -14,7 +14,7 @@ Hush is built on [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) wit
 pip install livekit-plugins-hush
 ```
 
-Dependencies: `livekit >= 1.0.25`, `livekit-agents >= 1.4.4`, `numpy >= 1.26.0`, `onnxruntime >= 1.17.0`.
+Dependencies: Python >= 3.11, `livekit >= 1.0.25`, `livekit-agents >= 1.4.4`, `numpy >= 1.26.0`, `onnxruntime >= 1.17.0`.
 
 ---
 
@@ -188,8 +188,8 @@ Noisy originals and their Hush-denoised counterparts are in `docs/audio/`. The d
 
 ## Development
 
-CI runs the same checks on Python 3.10 and 3.13. `.python-version` pins the default local
-interpreter to 3.13, so these commands go from clone to green on a clean checkout:
+CI runs the same checks on Python 3.11–3.14. `.python-version` pins the default local
+interpreter to 3.14, so these commands go from clone to green on a clean checkout:
 
 ```
 git clone https://github.com/arpesenti/livekit-plugins-hush.git

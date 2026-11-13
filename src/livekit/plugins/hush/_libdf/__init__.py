@@ -132,8 +132,7 @@ class DF:
 
         output = np.empty((n_channels, n_frames, self.freq_bins), dtype=np.complex64)
         for ch in range(n_channels):
-            # Annotate for the narrower numpy stubs on Python 3.10.
-            mem: np.ndarray = self._analysis_mem.copy()
+            mem = self._analysis_mem.copy()
             for i in range(n_frames):
                 chunk = audio[ch, i * self.hop_size : (i + 1) * self.hop_size]
                 # Concatenate the previous context with the new input.
@@ -170,8 +169,7 @@ class DF:
 
         output = np.empty((n_channels, out_samples), dtype=np.float32)
         for ch in range(n_channels):
-            # Annotate for the narrower numpy stubs on Python 3.10.
-            mem: np.ndarray = self._synthesis_mem.copy()
+            mem = self._synthesis_mem.copy()
             for i in range(n_frames):
                 # IFFT to time domain. N is built into the spec.
                 x = np.fft.irfft(spec[ch, i], n=self.fft_size).astype(np.float32)
