@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.4.0 — No unenhanced frames
+
+**Fixed:**
+
+- **Frames are never handed back untouched while the processor is on.**
+  The suppressor returned the raw input frame whenever its sample-rate
+  converter had nothing ready on that call, and again whenever the samples
+  it had drained could not fill a frame. Measured against the real model,
+  that was up to **91 % of frames** at 8 kHz and 70 % at 24 kHz with 10 ms
+  frames — noise suppression was mostly inert, and the frames that *were*
+  enhanced arrived 100 ms late, so audio was dropped at the seams. The leak
+  is now **0.0 % at every rate from 8 to 48 kHz and every frame size from
+  10 to 100 ms** (see `docs/adr/0001-no-leak-enhanced-path.md`).
+- **Frame-in is decoupled from the model's 160-sample hop.** A new
+  `_StreamStage` buffers converter output, feeds whole hops, and emits
+  exactly as many samples as arrived, from an output FIFO. The trim/pad
+  that hid the resulting skew is gone.
+- **The stream head is primed with silence for exactly the converter
+  backlog**, probed once per stream rather than assumed. Priming is
+  deterministic — it does not stop at the first frame that happens to
+  fill, which is what leaked later.
+- **`strength=0` and `enabled=False` are now true cheap bypasses**: the frame is
+  returned untouched with no inference and no resampling. Previously
+  `strength=0` still ran the full model.
+- **A failure no longer leaks.** `_process` never raises, so the host cannot
+  fall back to handing the raw frame downstream: a failed hop, or a
+  processing failure anywhere in the enhanced path, emits silence and bumps
+  `failures`.
+- **A pause re-primes.** Toggling `enabled` back on clears the buffers and the
+  DF history rather than replaying audio the consumer never heard — the
+  per-stream prime gate and the lifetime counter are now separate, which is
+  what made a second stream start from an empty pipeline.
+- **Rate changes and stream changes re-prime** instead of delivering the
+  previous stream's buffered audio.
+
+**Added:**
+
+- Read-only diagnostics on `HushNoiseSuppressor`: `hops_processed`,
+  `prime_samples`, `underruns`, `failures`, `pending_output_samples`.
+  `underruns` should stay 0 — it is the canary for a converter change
+  breaking the prime. `pending_output_samples` is the tail a closing stream
+  drops (converter state beyond the FIFO also goes, but it is bounded by the
+  prime, which `prime_samples` measures).
+
+**Changed:**
+
+- **Added delay.** Non-16 kHz input now has a constant, deterministic delay
+  instead of an intermittent leak: 120–200 ms at 24–48 kHz and 240–300 ms
+  at 8 kHz, depending on frame size. 16 kHz is unchanged (no delay, no
+  prime). Lower-latency rate conversion is a candidate follow-up.
+
+**Tests:**
+
+- New `tests/test_stream_stage.py` drives the real `rtc.AudioResampler`
+  across the rate × frame-size matrix — the gap the mocked-model tests
+  could not see (all 31 of them passed with this bug present).
+
 ## 0.3.1 — Performance
 
 **Improvements:**

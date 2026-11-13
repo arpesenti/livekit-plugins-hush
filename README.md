@@ -39,7 +39,7 @@ One instance per session. The ONNX model is loaded once per worker process and s
 hush.noise_suppression(
     strength=0.5,       # wet/dry blend: 0.0 = bypass, 1.0 = full (default 0.5)
     atten_lim_db=100.0, # max attenuation in dB (100.0 = unlimited)
-    debug_logging=False, # log per-frame RMS every 100 frames
+    debug_logging=False, # log per-hop RMS every 100 hops
 )
 ```
 
@@ -57,18 +57,44 @@ The pure-numpy STFT runs in streaming mode (`reset=False`), so its analysis/synt
 
 ```
 LiveKit AudioFrame (any rate, any channels)
+  → prime: silence while the converters fill (see Added delay)
   → resample to 16 kHz mono
-  → buffer 10 ms (160 samples) per frame
+  → buffer whole 10 ms hops (160 samples), remainder carried
   → Pure-numpy streaming STFT (1 frame out, state carried)
   → ERB features + DF spectral features
   → ONNX: encoder → ERB decoder + DF decoder (with continuous GRU state)
   → apply ERB mask + DF complex filter to spectrum
   → apply atten_lim_db linear blend (matches upstream reference)
   → Pure-numpy streaming ISTFT
-  → wet/dry blend
+  → wet/dry blend (both sides at the same FIFO position)
   → upsample, restore channels
+  → output FIFO: emit exactly as many samples as arrived
 → AudioFrame
 ```
+
+A frame never comes back as its own input. The resampler returns its samples in bursts, and its
+burst is not a multiple of a hop, so the frame rate and the hop rate are decoupled by that output
+FIFO. A frame that arrives while the converter has nothing to give is answered with **silence**,
+never with the unenhanced input — see `docs/adr/0001-no-leak-enhanced-path.md`.
+
+### Added delay
+
+That design costs a fixed delay on any input that is not already 16 kHz, because each streaming
+converter holds a burst back and the output has to be delayed by that much before it can be
+continuous:
+
+| Input rate | 10 ms frames | 50 ms frames | 100 ms frames |
+|---|---|---|---|
+| 8 000 | 240 ms | 250 ms | 300 ms |
+| 16 000 | 0 | 0 | 0 |
+| 24 000 | 120 ms | 150 ms | 200 ms |
+| 32 000 | 130 ms | 150 ms | 200 ms |
+| 44 100 | 160 ms | 200 ms | 200 ms |
+| 48 000 | 120 ms | 150 ms | 200 ms |
+
+The delay is constant for a given rate and frame size (it is a prime, not jitter), it starts as
+silence at the head of the stream, and it re-primes on a rate change or a resumed stream. Cutting
+it is tracked separately: it needs the converters replaced with a resampler whose delay is known.
 
 ### Model sharing
 
@@ -86,6 +112,7 @@ The ONNX session is a process-level singleton. Each `HushNoiseSuppressor` instan
 |---|---|---|
 | Frame size | 1 frame (10 ms) | Full audio |
 | Algorithmic latency | 10 ms | N/A (offline) |
+| Added delay | 0 ms at 16 kHz, 120–300 ms otherwise (see Added delay) | N/A |
 | Per-frame time (single session) | ~0.25 ms | — |
 | Per-frame time (20 concurrent) | ~0.20 ms | — |
 | Real-time factor | 0.025× (per frame) | 0.008× |
