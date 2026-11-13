@@ -23,26 +23,29 @@ _Avoid_: frame, window, chunk
 
 ### Timing
 
-**Backlog**:
-Samples a streaming resampler has accepted but not yet returned. A resampler hands them back in
-bursts, so its signal is not shifted in time even though its delivery arrives late.
-_Avoid_: latency, delay, buffer
+**Converter delay**:
+The delay a streaming resampler declares: half its kernel, a constant known when it is built. It
+replaced the old per-rate backlog probe, which measured how many samples a bursty converter held
+back.
+_Avoid_: backlog, burst, measured delay
 
 **Algorithmic latency**:
 The delay inherent to the model: 10 ms (one hop) of STFT lookahead on top of fully causal state.
 _Avoid_: backlog, processing time
 
 **Added delay**:
-The total delay the processor inserts beyond the algorithm: backlog plus the wait to assemble a
-full frame.
+The total delay the processor inserts beyond the algorithm: the converters' declared delay plus
+at most one hop of hop/frame quantisation. It is not quantised to whole frames.
 _Avoid_: latency
 
 **Prime**:
-Silence placed at the head of a stream so the enhanced path has enough lead to never underrun.
-_Avoid_: prefill, padding, warmup
+Silence placed at the head of a stream to pay the converters' declared delay. It is emitted
+inside a frame — silence first, then the audio that is ready — not in whole frames.
+_Avoid_: prefill, padding, warmup, backlog
 
 **Underrun**:
-A frame the enhanced path could not fill because fewer samples were ready than the frame needed.
+A shortfall larger than one hop after the stream has been primed, meaning the enhanced path is
+not keeping up. A smaller shortfall is the expected hop quantisation and is counted as prime.
 
 ### Modes
 

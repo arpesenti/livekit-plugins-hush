@@ -59,8 +59,7 @@ The pure-numpy STFT runs in streaming mode (`reset=False`), so its analysis/synt
 
 ```
 LiveKit AudioFrame (any rate, any channels)
-  → prime: silence while the converters fill (see Added delay)
-  → resample to 16 kHz mono
+  → resample to 16 kHz mono (declared kernel/2 delay)
   → buffer whole 10 ms hops (160 samples), remainder carried
   → Pure-numpy streaming STFT (1 frame out, state carried)
   → ERB features + DF spectral features
@@ -70,33 +69,44 @@ LiveKit AudioFrame (any rate, any channels)
   → Pure-numpy streaming ISTFT
   → wet/dry blend (both sides at the same FIFO position)
   → upsample, restore channels
-  → output FIFO: emit exactly as many samples as arrived
+  → output FIFO: pad any gap with silence at the head of the frame,
+    then emit exactly as many samples as arrived
 → AudioFrame
 ```
 
-A frame never comes back as its own input. The resampler returns its samples in bursts, and its
-burst is not a multiple of a hop, so the frame rate and the hop rate are decoupled by that output
-FIFO. A frame that arrives while the converter has nothing to give is answered with **silence**,
-never with the unenhanced input — see `docs/adr/0001-no-leak-enhanced-path.md`.
+A frame never comes back as its own input. The frame rate and the model's hop rate are decoupled
+by an output FIFO; when the converters have not produced a full frame yet, the gap is filled with
+silence at the head of that frame, never with the unenhanced input — see
+`docs/adr/0001-no-leak-enhanced-path.md`.
 
-### Added delay
+### Rate conversion and added delay
 
-That design costs a fixed delay on any input that is not already 16 kHz, because each streaming
-converter holds a burst back and the output has to be delayed by that much before it can be
-continuous:
+Rate conversion is an in-repo streaming polyphase (windowed-sinc) resampler, not
+`rtc.AudioResampler`. Each converter has a declared delay of **half its kernel** — 3.1–3.3 ms per
+converter at every rate — and the stage pays that delay with silence at the head of the stream.
+The padding is sub-frame: the first frame can carry silence followed by audio, so the prime never
+rounds up to a whole frame.
 
-| Input rate | 10 ms frames | 50 ms frames | 100 ms frames |
-|---|---|---|---|
-| 8 000 | 240 ms | 250 ms | 300 ms |
-| 16 000 | 0 | 0 | 0 |
-| 24 000 | 120 ms | 150 ms | 200 ms |
-| 32 000 | 130 ms | 150 ms | 200 ms |
-| 44 100 | 160 ms | 200 ms | 200 ms |
-| 48 000 | 120 ms | 150 ms | 200 ms |
+| Input rate | 10 ms frames | 20 ms frames | 50 ms frames | 100 ms frames |
+|---|---|---|---|---|
+| 8 000 | 13.2 ms | 13.2 ms | 13.2 ms | 13.2 ms |
+| 16 000 | 0 | 0 | 0 | 0 |
+| 24 000 | 13.2 ms | 13.2 ms | 13.2 ms | 13.2 ms |
+| 32 000 | 13.2 ms | 13.2 ms | 13.2 ms | 13.2 ms |
+| 44 100 | 13.2 ms | 13.2 ms | 13.2 ms | 13.2 ms |
+| 48 000 | 13.1 ms | 13.1 ms | 13.1 ms | 13.1 ms |
 
-The delay is constant for a given rate and frame size (it is a prime, not jitter), it starts as
-silence at the head of the stream, and it re-primes on a rate change or a resumed stream. Cutting
-it is tracked separately: it needs the converters replaced with a resampler whose delay is known.
+Measured as the cross-correlation lag between input and output with a stand-in hop processor
+(so the model's own 10 ms algorithmic latency is excluded), 20 s per combination; reproduce with
+`python scripts/measure_delay.py`. The delay is constant per rate and frame size, starts as
+silence at the head of the stream, and re-primes on a rate change or a resumed stream.
+
+The anti-alias band is explicit: 80 dB stopband attenuation with an 800 Hz transition. Converting
+to/from 16 kHz uses a 7.2 kHz passband edge and an 8.0 kHz stopband edge (the new Nyquist); the
+8 kHz path, which interpolates to 16 kHz and decimates back, uses 3.2 kHz / 4.0 kHz. Every
+decimating ratio and the 8 kHz images are tested. Quality against the previous converter is
+re-checked by `python scripts/compare_resampler_quality.py`: the speech-band spectral difference
+is 0.00–0.02 dB mean and 0.15 dB worst, and stopband/image rejection is 77–95 dB.
 
 ### Model sharing
 
@@ -114,7 +124,7 @@ The ONNX session is a process-level singleton. Each `HushNoiseSuppressor` instan
 |---|---|---|
 | Frame size | 1 frame (10 ms) | Full audio |
 | Algorithmic latency | 10 ms | N/A (offline) |
-| Added delay | 0 ms at 16 kHz, 120–300 ms otherwise (see Added delay) | N/A |
+| Added delay | 0 ms at 16 kHz, ~13 ms otherwise (see Rate conversion and added delay) | N/A |
 | Per-frame time (single session) | ~0.25 ms | — |
 | Per-frame time (20 concurrent) | ~0.20 ms | — |
 | Real-time factor | 0.025× (per frame) | 0.008× |

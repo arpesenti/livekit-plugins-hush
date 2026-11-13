@@ -20,8 +20,9 @@ Drop-in replacement for livekit-plugins-noise-cancellation / ai-coustics.
 Streaming contract: a frame in always produces a frame of the same length
 out, drawn from the enhanced path. The frame rate the host uses and the
 model's 160-sample hop are decoupled by ``_StreamStage``, which buffers,
-resamples and — at the head of a stream only — emits silence so the model
-never has to be bypassed. See ``docs/adr/0001-no-leak-enhanced-path.md``.
+resamples and pads with silence where the converters' declared delay leaves a
+gap, so the model never has to be bypassed. See
+``docs/adr/0001-no-leak-enhanced-path.md``.
 """
 
 import logging
@@ -38,6 +39,7 @@ from ._hush_model import (
     HushSession,
     _get_shared_model,
 )
+from ._resampler import PolyphaseResampler
 
 logger = logging.getLogger(__name__)
 
@@ -51,41 +53,6 @@ def _frame_to_float(frame: rtc.AudioFrame) -> np.ndarray:
     return np.frombuffer(frame.data, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def _to_int16_frame(samples: np.ndarray, sample_rate: int) -> rtc.AudioFrame:
-    pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
-    return rtc.AudioFrame(
-        data=pcm.tobytes(),
-        sample_rate=sample_rate,
-        num_channels=1,
-        samples_per_channel=len(pcm),
-    )
-
-
-#: Hops of silence used to warm the converters when measuring their backlog.
-_BACKLOG_PROBE_HOPS = 50
-
-
-def _build_converters(
-    rate: int,
-) -> tuple[rtc.AudioResampler | None, rtc.AudioResampler | None]:
-    """The native-rate <-> 16 kHz converter pair for `rate`, or (None, None)."""
-    if rate == _SAMPLE_RATE:
-        return None, None
-    down = rtc.AudioResampler(
-        input_rate=rate,
-        output_rate=_SAMPLE_RATE,
-        num_channels=1,
-        quality=rtc.AudioResamplerQuality.MEDIUM,
-    )
-    up = rtc.AudioResampler(
-        input_rate=_SAMPLE_RATE,
-        output_rate=rate,
-        num_channels=1,
-        quality=rtc.AudioResamplerQuality.MEDIUM,
-    )
-    return down, up
-
-
 def _silence_like(frame: rtc.AudioFrame) -> rtc.AudioFrame:
     """A frame's worth of silence, shaped like `frame`."""
     pcm = np.zeros(frame.samples_per_channel * frame.num_channels, dtype=np.int16)
@@ -95,44 +62,6 @@ def _silence_like(frame: rtc.AudioFrame) -> rtc.AudioFrame:
         num_channels=frame.num_channels,
         samples_per_channel=frame.samples_per_channel,
     )
-
-
-def _measure_backlog(rate: int) -> int:
-    """Native-rate samples the converter pair can hold back at its worst.
-
-    A streaming resampler buffers before it returns anything, and the amount
-    it holds oscillates over its burst cycle. The peak is the dead time the
-    stage cannot see through its own FIFO: sound has to be delayed by that
-    much before any of it can be delivered, so the stage primes with silence
-    for this many samples. Measured, never assumed: it differs per rate (and
-    would differ again if the converter were swapped out).
-    """
-    down, up = _build_converters(rate)
-    if down is None or up is None:
-        return 0
-
-    n_native = _FRAME_SAMPLES * rate // _SAMPLE_RATE
-    silence = np.zeros(n_native, dtype=np.int16)
-    pushed = 0
-    delivered = 0
-    peak = 0
-    for _ in range(_BACKLOG_PROBE_HOPS):
-        frame = rtc.AudioFrame(
-            data=silence.tobytes(),
-            sample_rate=rate,
-            num_channels=1,
-            samples_per_channel=n_native,
-        )
-        pushed += n_native
-        blocks = [_frame_to_float(f) for f in down.push(frame)]
-        if blocks:
-            block = np.concatenate(blocks)
-            block = block[: len(block) - len(block) % _FRAME_SAMPLES]
-            if len(block):
-                for f in up.push(_to_int16_frame(block, _SAMPLE_RATE)):
-                    delivered += f.samples_per_channel
-        peak = max(peak, pushed - delivered)
-    return peak
 
 
 class _QueueBuffer:
@@ -196,13 +125,14 @@ class _StreamStage:
     signal and converted back. ``push()`` always returns exactly as many
     samples as it was given.
 
-    A streaming resampler returns its samples in bursts, so it routinely
-    has nothing to hand back, and its burst size is not a multiple of the
-    hop. The output FIFO therefore absorbs the deficit: while it cannot
-    fill a frame, the stage emits silence (the *prime*). Because input and
-    output rates are equal in the long run, the prime settles at exactly
-    the converters' backlog and no further shortfall occurs; a shortfall
-    after the first successful frame is an *underrun* and is counted.
+    Each converter declares a delay of half its kernel. The output FIFO
+    absorbs whatever that delay, the hop buffer and the frame boundary leave
+    short: a frame that cannot be filled with audio carries silence first and
+    the audio that is ready after it (the *prime*), never a whole silent
+    frame just because the converters are still filling. The prime therefore
+    self-sizes to the declared delay plus at most one hop. A later shortfall
+    larger than a hop means the enhanced path is not keeping up after all;
+    that is an *underrun* and is counted.
     """
 
     def __init__(
@@ -221,13 +151,14 @@ class _StreamStage:
         self._dry_q = _QueueBuffer() if strength < 1.0 else None  # 16 kHz input
         self._out_q = _QueueBuffer()  # native rate, awaiting delivery
 
-        self._down: rtc.AudioResampler | None = None
-        self._up: rtc.AudioResampler | None = None
+        self._down: PolyphaseResampler | None = None
+        self._up: PolyphaseResampler | None = None
         self._rate = 0
-        self._backlog = 0
-        # How much of this stream's prime has been emitted. Separate from the
-        # lifetime counter below: the gate must go back to 0 on reset.
-        self._prime_gate = 0
+        self._hop_native = 0
+        self._declared_delay = 0
+        # The stream has delivered a full frame, or has paid the declared
+        # prime; from then on a large shortfall is unexpected.
+        self._primed = False
 
         # Counters. Never reset: they describe the lifetime of the stream.
         self.hops_processed = 0
@@ -246,9 +177,9 @@ class _StreamStage:
         return len(self._out_q)
 
     @property
-    def backlog_samples(self) -> int:
-        """Native-rate samples the converters hold back at their worst."""
-        return self._backlog
+    def declared_delay_samples(self) -> int:
+        """Native samples of delay the converters declare (their kernel/2)."""
+        return self._declared_delay
 
     def reset(self) -> None:
         """Forget everything buffered. The next frame re-derives the rate."""
@@ -260,16 +191,23 @@ class _StreamStage:
         self._down = None
         self._up = None
         self._rate = 0
-        self._backlog = 0
-        self._prime_gate = 0
+        self._hop_native = 0
+        self._declared_delay = 0
+        self._primed = False
         self._debug_hop_count = 0
 
     def rebuild(self, rate: int) -> None:
         """(Re)configure for a native sample rate, discarding buffered audio."""
         self.reset()
         self._rate = rate
-        self._backlog = _measure_backlog(rate)
-        self._down, self._up = _build_converters(rate)
+        self._hop_native = _FRAME_SAMPLES * rate // _SAMPLE_RATE
+        if rate == _SAMPLE_RATE:
+            return
+        self._down = PolyphaseResampler(rate, _SAMPLE_RATE)
+        self._up = PolyphaseResampler(_SAMPLE_RATE, rate)
+        self._declared_delay = (
+            self._down.delay_input_samples + self._up.delay_output_samples
+        )
 
     def push(self, samples: np.ndarray) -> np.ndarray:
         """Feed one frame's samples in; get exactly as many back."""
@@ -277,15 +215,9 @@ class _StreamStage:
         if need == 0:
             return np.zeros(0, dtype=np.float32)
 
-        # 1. native rate → 16 kHz (the converter hands back 0..N samples)
-        if self._down is not None:
-            blocks = [
-                _frame_to_float(f)
-                for f in self._down.push(_to_int16_frame(samples, self._rate))
-            ]
-            arrived = np.concatenate(blocks) if blocks else np.zeros(0, np.float32)
-        else:
-            arrived = samples
+        # 1. native rate → 16 kHz. The converter withholds its declared
+        # delay at the head; the padding below pays for it.
+        arrived = self._down.push(samples) if self._down is not None else samples
 
         if len(arrived):
             self._in_q.append(arrived)
@@ -301,19 +233,32 @@ class _StreamStage:
         # 3. wet/dry in one timebase, then 16 kHz → native
         self._flush_wet()
 
-        # 4. prime, then deliver exactly what arrived
-        if self._prime_gate < self._prime_target(need):
-            # The converters are still filling. Nothing buffered is consumed,
-            # so every sample arrives late — none is lost, none is bypassed.
-            self._prime_gate += need
-            self.prime_samples += need
-            return np.zeros(need, dtype=np.float32)
+        # 4. Deliver exactly what arrived. A shortfall is filled with silence
+        # at the head of the same frame, so priming is never quantised to a
+        # whole frame: the audio starts where the converters' delay ends.
+        available = len(self._out_q)
+        if available >= need:
+            out = self._out_q.peek(need).copy()
+            self._out_q.popleft(need)
+            self._primed = True
+            return out
 
-        if len(self._out_q) < need:
-            return self._on_shortfall(need)
+        pad = need - available
+        out = np.zeros(need, dtype=np.float32)
+        if available:
+            out[pad:] = self._out_q.peek(available)
+            self._out_q.popleft(available)
+        self.prime_samples += pad
 
-        out = self._out_q.peek(need).copy()
-        self._out_q.popleft(need)
+        if self._primed and self._hop_native and pad > self._hop_native:
+            self.underruns += 1
+            if self.underruns == 1:
+                logger.warning(
+                    "Hush output FIFO underrun (%d samples short); emitting silence",
+                    pad,
+                )
+        if self.prime_samples >= self._declared_delay + self._hop_native:
+            self._primed = True
         return out
 
     def record_failure(self, what: str) -> None:
@@ -361,38 +306,9 @@ class _StreamStage:
             self._to_native(wet)
 
     def _to_native(self, block: np.ndarray) -> None:
-        if self._up is None:
-            self._out_q.append(block)
-            return
-        for f in self._up.push(_to_int16_frame(block, _SAMPLE_RATE)):
-            self._out_q.append(_frame_to_float(f))
-
-    def _prime_target(self, need: int) -> int:
-        """Silence to emit before the enhanced path can be trusted to keep up.
-
-        The measured worst-case converter backlog, plus a hop's worth for the
-        16 kHz remainder the stage itself hides, plus one more when the native
-        hop is not a whole number of frames. Deterministic: priming runs to
-        this count and does not stop at the first frame that happens to fill,
-        because that is exactly the situation that leaks or drops later. Zero
-        at 16 kHz with hop-aligned frames — no converter, nothing to cover.
-        """
-        hop_native = _FRAME_SAMPLES * self._rate // _SAMPLE_RATE
-        if self._rate == 0 or hop_native == 0:
-            return self._backlog
-        remainder = hop_native if need % hop_native else 0
-        if self._backlog == 0:
-            return remainder
-        return self._backlog + hop_native + remainder
-
-    def _on_shortfall(self, need: int) -> np.ndarray:
-        self.underruns += 1
-        if self.underruns == 1:
-            logger.warning(
-                "Hush output FIFO underrun (%d samples wanted); emitting silence",
-                need,
-            )
-        return np.zeros(need, dtype=np.float32)
+        if self._up is not None:
+            block = self._up.push(block)
+        self._out_q.append(block)
 
 
 class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
@@ -460,8 +376,13 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         return self._stage.prime_samples
 
     @property
+    def declared_delay_samples(self) -> int:
+        """Native samples of delay the converters declare (their kernel/2)."""
+        return self._stage.declared_delay_samples
+
+    @property
     def underruns(self) -> int:
-        """Frames that could not be filled after the prime — expected to be 0."""
+        """Shortfalls larger than one hop after priming — expected to be 0."""
         return self._stage.underruns
 
     @property
