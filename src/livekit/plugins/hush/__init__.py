@@ -11,7 +11,7 @@ class HushPlugin(Plugin):
     def __init__(self):
         super().__init__(
             title="Hush",
-            version="0.4.0",
+            version="0.5.0",
             package="livekit-plugins-hush",
             logger=logger,
         )

@@ -114,10 +114,14 @@ class TestFrameProcessing:
         assert np.all(out == 0.0), "the prime must be silence, not the input"
         assert mock_suppressor.hops_processed == 0
 
-        # A hop of lead is primed before delivery starts, then the model fills.
+        # One hop of lead covers the hop buffer; priming is sub-frame, so the
+        # second frame is already audio for the first frame's input.
         second = rng.uniform(-0.5, 0.5, 80).astype(np.float32)
-        mock_suppressor._process(create_audio_frame(second))
-        assert mock_suppressor.prime_samples == 2 * 80
+        result = mock_suppressor._process(create_audio_frame(second))
+        out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+        assert mock_suppressor.prime_samples == 80
+        assert mock_suppressor.hops_processed == 1
+        np.testing.assert_array_almost_equal(out, first * 0.5, decimal=3)
 
         third = rng.uniform(-0.5, 0.5, 80).astype(np.float32)
         result = mock_suppressor._process(create_audio_frame(third))
@@ -125,7 +129,7 @@ class TestFrameProcessing:
         assert len(out) == 80
         assert mock_suppressor.hops_processed == 1
         assert mock_suppressor.underruns == 0
-        np.testing.assert_array_almost_equal(out, first * 0.5, decimal=3)
+        np.testing.assert_array_almost_equal(out, second * 0.5, decimal=3)
 
     def test_exact_frame(self, mock_suppressor):
         """Exactly one 10 ms frame (160 samples)."""
@@ -295,6 +299,13 @@ class TestFrameProcessing:
         )
         assert ns.underruns == 0
 
+    def test_declared_delay_is_exposed_from_the_stage(self, mock_suppressor):
+        """The diagnostic reports the converter delay, not the measured prime."""
+        assert mock_suppressor.declared_delay_samples == 0
+        frame = create_audio_frame(np.zeros(480, dtype=np.float32), sample_rate=48000)
+        mock_suppressor._process(frame)
+        assert mock_suppressor.declared_delay_samples > 0
+
     def test_processing_failure_is_counted_and_silent(self, monkeypatch):
         """A failure outside a hop must not raise, and must not leak the input."""
         _patch_module(monkeypatch)
@@ -325,7 +336,7 @@ class TestFrameProcessing:
         for _ in range(60):
             ns._process(
                 create_audio_frame(
-                    rng.uniform(-0.5, 0.5, 80).astype(np.float32), sample_rate=8000
+                    rng.uniform(-0.5, 0.5, 100).astype(np.float32), sample_rate=8000
                 )
             )
         pending = ns.pending_output_samples
@@ -817,8 +828,8 @@ class TestCoverageGaps:
             f"Expected 4410 samples, got {result.samples_per_channel}"
         )
 
-    def test_resampler_flush_on_rate_change(self, monkeypatch):
-        """Mid-session rate switch triggers resampler flush code path."""
+    def test_rate_change_rebuilds_the_converters(self, monkeypatch):
+        """Mid-session rate switch rebuilds the converter state and re-primes."""
         _patch_module(monkeypatch)
         import livekit.plugins.hush.noise_suppressor as ns_module
 

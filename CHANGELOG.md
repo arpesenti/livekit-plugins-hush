@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.5.0 — Flat 13 ms delay at every rate
+
+**Fixed:**
+
+- **The delay the enhanced path adds is now ~13 ms at every rate and frame
+  size**, down from 120–200 ms at 24–48 kHz and 240–300 ms at 8 kHz. 16 kHz
+  stays at 0 ms. `rtc.AudioResampler` no longer touches the enhanced path:
+  `_resampler.py` is an in-repo streaming polyphase windowed-sinc resampler
+  whose delay is declared as half its kernel (3.1–3.3 ms per converter), not
+  measured as a burst backlog. Cross-correlation lag: 13.2 ms at 8/24/32/
+  44.1 kHz and 13.1 ms at 48 kHz, against 120–300 ms before.
+- **Priming is sub-frame.** A frame that cannot be filled now carries silence
+  first and the audio that is ready after it. The prime self-sizes to the
+  converters' declared delay plus at most one hop, and never rounds up to a
+  whole frame — which by itself would have cost 50–100 ms at 50/100 ms frames.
+  Tests assert that the leading silence and the first audio share the first
+  frame at 50 and 100 ms.
+- **The per-rate backlog probe is gone.** `_measure_backlog`, the 50-hop
+  warm-up and `backlog_samples` are removed; `declared_delay_samples` reports
+  the converters' kernel/2 delay instead. The prime is derived from that
+  declared delay, not from a runtime measurement.
+
+**Changed:**
+
+- **Anti-alias behaviour is explicit.** Kaiser window, 80 dB stopband
+  attenuation, 800 Hz transition. Converting to/from 16 kHz: 7.2 kHz
+  passband edge, 8.0 kHz stopband edge (the new Nyquist). The 8 kHz path
+  (interpolation to 16 kHz and decimation back): 3.2 kHz / 4.0 kHz. Every
+  decimating ratio and the interpolation images are tested.
+- **`underruns` now means a shortfall larger than one hop after the prime.**
+  The recurring shortfall from a frame that is not a whole number of hops is
+  expected quantisation and is counted as prime; it no longer trips the
+  canary. It stays 0 across the rate × frame matrix.
+- **Quality parity is re-checked by a script.** On the reference speech file,
+  the new converter's speech-band spectral difference from the old one is
+  0.00–0.02 dB mean and 0.15 dB worst (tolerance: 0.10 / 0.50 dB); stopband and
+  image rejection measure 77–95 dB. The 7.2–8.0 kHz roll-off is the deliberate
+  anti-alias edge, not a broadband artefact.
+
+**Added:**
+
+- `scripts/measure_delay.py` — reproduces the added-delay table with a
+  stand-in hop processor or the real model.
+- `scripts/compare_resampler_quality.py` — re-runs the old-vs-new spectral
+  comparison and the anti-alias checks.
+
+**Removed:**
+
+- The `backlog_samples` diagnostic (use `declared_delay_samples`).
+
+**Tests:**
+
+- `tests/test_resampler.py` covers every converter pair: exact sample counts
+  (including the 44.1 kHz non-integral ratio), declared delay, flat passband,
+  stopband attenuation, interpolation images and reset.
+- `tests/test_stream_stage.py` now measures cross-correlation delay across the
+  24-combination matrix (≤ 60 ms everywhere, actually ~13 ms), asserts the
+  prime is the declared delay plus at most one hop, and drives 30 s per
+  combination to keep the leak at 0 % and `underruns` at 0.
+
+
 ## 0.4.0 — No unenhanced frames
 
 **Fixed:**
