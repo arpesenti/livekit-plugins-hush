@@ -7,8 +7,8 @@ Run: python -m pytest tests/ -v
 
 import numpy as np
 import pytest
-from livekit import rtc
 
+from livekit import rtc
 
 # ------------------------------------------------------------------ #
 # Helpers                                                              #
@@ -29,6 +29,11 @@ def create_audio_frame(
         num_channels=num_channels,
         samples_per_channel=len(int16_samples) // num_channels,
     )
+
+
+def frame_to_float(frame: rtc.AudioFrame) -> np.ndarray:
+    """AudioFrame back to float32 samples in [-1, 1]."""
+    return np.frombuffer(frame.data, dtype=np.int16).astype(np.float32) / 32768.0
 
 
 # ------------------------------------------------------------------ #
@@ -215,8 +220,130 @@ class TestFrameProcessing:
         assert result.num_channels == 2
         assert result.samples_per_channel == 160
 
-    @pytest.mark.parametrize("rate", (8000, 16000, 24000, 32000, 48000))
-    @pytest.mark.parametrize("frame_ms", (10, 20, 50))
+    @pytest.mark.parametrize("rate", (8000, 48000))
+    @pytest.mark.parametrize("mode", ("strength", "disabled"))
+    def test_bypass_is_free(self, monkeypatch, rate, mode):
+        """A bypass returns the frame itself: no inference, no resampling."""
+        _patch_module(monkeypatch)
+        import livekit.plugins.hush.noise_suppressor as ns_module
+
+        if mode == "strength":
+            ns = ns_module.HushNoiseSuppressor(strength=0.0)
+        else:
+            ns = ns_module.HushNoiseSuppressor(strength=1.0)
+            ns.enabled = False
+
+        samples = (
+            np.random.default_rng(1)
+            .uniform(-0.5, 0.5, int(rate * 0.010))
+            .astype(np.float32)
+        )
+        frame = create_audio_frame(samples, sample_rate=rate)
+        result = ns._process(frame)
+
+        assert result is frame
+        assert ns.hops_processed == 0
+        assert ns.startup_fill_samples == 0
+        assert ns._stage.rate == 0, "a bypass must not even build a converter"
+
+    def test_reenabling_does_not_replay_stale_audio(self, monkeypatch):
+        """Audio buffered before a pause belongs to a moment nobody heard."""
+        _patch_module(monkeypatch)
+        import livekit.plugins.hush.noise_suppressor as ns_module
+
+        ns = ns_module.HushNoiseSuppressor(strength=1.0)
+        rng = np.random.default_rng(4)
+
+        def frame(value=None):
+            samples = (
+                np.full(80, value, dtype=np.float32)
+                if value is not None
+                else rng.uniform(-0.5, 0.5, 80).astype(np.float32)
+            )
+            return create_audio_frame(samples, sample_rate=8000)
+
+        for _ in range(40):  # fill the converters and the output FIFO
+            ns._process(frame())
+        assert ns.hops_processed > 0
+
+        ns.enabled = False
+        for _ in range(5):
+            ns._process(frame())
+        ns.enabled = True
+
+        result = ns._process(frame(0.4))
+        out = frame_to_float(result)
+        assert np.all(out == 0.0), (
+            "re-enabling must re-prime, not replay buffered audio"
+        )
+
+        # ...and it must actually resume, not stay silent forever.
+        audible = None
+        for _ in range(40):
+            out = frame_to_float(ns._process(frame(0.4)))
+            if np.any(out != 0.0):
+                audible = out
+                break
+        assert audible is not None, "the stream never resumed after re-enabling"
+        # The converters ramp for a sample or two, so judge the settled level.
+        assert np.isclose(np.median(audible), 0.2, atol=2e-2), (
+            f"resumed audio should be the model's 0.5x of 0.4, "
+            f"got {np.median(audible):.4f}"
+        )
+        assert ns.underruns == 0
+
+    def test_close_discards_buffered_audio(self, monkeypatch, caplog):
+        """The tail has nowhere to go at close; it is dropped, reported and freed."""
+        _patch_module(monkeypatch)
+        import livekit.plugins.hush.noise_suppressor as ns_module
+
+        ns = ns_module.HushNoiseSuppressor(strength=1.0)
+        rng = np.random.default_rng(5)
+        for _ in range(60):
+            ns._process(
+                create_audio_frame(
+                    rng.uniform(-0.5, 0.5, 80).astype(np.float32), sample_rate=8000
+                )
+            )
+        owed = ns.owed_samples
+        assert owed > 0
+
+        caplog.set_level("DEBUG", logger="livekit.plugins.hush.noise_suppressor")
+        ns._close()
+
+        assert "discarding" in caplog.text
+        # The buffers are gone even though the counter stays as history.
+        assert ns._stage.pending_output_samples == 0
+        assert ns._stage.rate == 0
+        assert str(owed) in caplog.text
+
+    def test_stream_tail_is_bounded_by_the_prime(self, monkeypatch):
+        """Everything accepted is delivered, bar at most one prime's worth of tail."""
+        _patch_module(monkeypatch)
+        import livekit.plugins.hush.noise_suppressor as ns_module
+
+        ns = ns_module.HushNoiseSuppressor(strength=1.0)
+        outputs = []
+        for _ in range(400):
+            frame = create_audio_frame(
+                np.full(80, 0.4, dtype=np.float32), sample_rate=8000
+            )
+            outputs.append(frame_to_float(ns._process(frame)))
+
+        prime = ns.startup_fill_samples
+        assert prime > 0
+        # The tail is the audio still inside the stage when the stream ends: it
+        # mirrors the silence already handed back and never exceeds the prime.
+        assert 0 < ns.owed_samples <= prime
+
+        # Nothing was dropped mid-stream: after priming, every frame carries the
+        # model's 0.5x of the 0.4 input.
+        gains = [float(np.median(o)) for o in outputs if np.any(o != 0.0)]
+        assert len(gains) >= 400 - prime // 80 - 2, "frames went missing"
+        assert all(abs(gain - 0.2) < 1e-2 for gain in gains), gains[:5]
+
+    @pytest.mark.parametrize("rate", (8000, 16000, 24000, 32000, 44100, 48000))
+    @pytest.mark.parametrize("frame_ms", (10, 20, 50, 100))
     def test_no_frame_is_returned_unenhanced(self, mock_suppressor, rate, frame_ms):
         """A frame never comes back as its own input, at any rate or frame size."""
         n = int(rate * frame_ms / 1000)
@@ -409,6 +536,49 @@ class TestIntegration:
         # Reset clears state
         session.reset_state()
         assert session._h_enc is None or np.abs(session._h_enc).max() == 0
+
+    def test_atten_lim_db_zero_passes_audio_through(self):
+        """atten_lim_db=0 removes nothing: the output tracks the input.
+
+        This is why "the output must differ from the input" cannot be the no-leak
+        invariant — object identity plus the hop counter is.
+        """
+        from livekit.plugins.hush import HushNoiseSuppressor
+
+        rng = np.random.default_rng(7)
+        ns = HushNoiseSuppressor(strength=1.0, atten_lim_db=0.0)
+        source, enhanced = [], []
+        for _ in range(50):
+            samples = rng.uniform(-0.4, 0.4, 160).astype(np.float32)
+            frame = create_audio_frame(samples)
+            result = ns._process(frame)
+            assert result is not frame, "still a fresh frame, even at 0 dB"
+            source.append(samples)
+            enhanced.append(
+                np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+            )
+        assert ns.hops_processed == 50
+        ns._close()
+
+        src = np.concatenate(source)[320:]
+        out = np.concatenate(enhanced)[320:]
+
+        # The model is causal with one hop of STFT lookahead, so the passthrough
+        # comes out 160 samples late: correlate over lags, don't assume position.
+        lag, corr = max(
+            (
+                (lag, float(np.corrcoef(src[: len(src) - lag], out[lag:])[0, 1]))
+                for lag in range(4 * 160)
+            ),
+            key=lambda pair: pair[1],
+        )
+        assert 0 <= lag <= 160, f"passthrough lag looks wrong: {lag} samples"
+        aligned = out[lag:]
+        ratio = np.sqrt(np.mean(aligned**2)) / np.sqrt(
+            np.mean(src[: len(aligned)] ** 2)
+        )
+        assert corr > 0.999, f"atten_lim_db=0 must pass audio through: corr={corr:.4f}"
+        assert 0.99 < ratio < 1.01, f"atten_lim_db=0 must not change level: {ratio:.4f}"
 
     def test_atten_lim_db_effect(self):
         """atten_lim_db < 100 dB limits suppression compared to unlimited."""
@@ -724,9 +894,10 @@ class TestCoverageGaps:
     )
     def test_clean_speech_preservation(self):
         """Clean speech should pass through with minimal distortion."""
-        from livekit.plugins.hush._hush_model import HushModel, HushSession
-        import wave
         import os
+        import wave
+
+        from livekit.plugins.hush._hush_model import HushModel, HushSession
 
         # Load clean speech sample
         speech_path = os.path.join(

@@ -33,8 +33,10 @@
 **Added:**
 
 - Read-only diagnostics on `HushNoiseSuppressor`: `hops_processed`,
-  `startup_fill_samples`, `underruns`, `model_failures`. `underruns` should
-  stay 0 — it is the canary for a converter change breaking the prime.
+  `startup_fill_samples`, `owed_samples`, `underruns`, `model_failures`.
+  `underruns` should stay 0 — it is the canary for a converter change
+  breaking the prime. `owed_samples` is the audio accepted but not yet handed
+  back, which is also exactly the tail a closing stream drops.
 
 **Changed:**
 

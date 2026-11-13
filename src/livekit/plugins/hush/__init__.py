@@ -1,7 +1,6 @@
-from typing import Optional
+import logging
 
 from livekit.agents import Plugin
-import logging
 
 from .noise_suppressor import HushNoiseSuppressor
 
@@ -19,7 +18,7 @@ class HushPlugin(Plugin):
 
 
 def noise_suppression(
-    model_path: Optional[str] = None,
+    model_path: str | None = None,
     atten_lim_db: float = 100.0,
     strength: float = 0.5,
     debug_logging: bool = False,
@@ -37,7 +36,7 @@ def noise_suppression(
     strength : float
         Wet/dry blend factor (default 0.5). 0.0 = bypass, 1.0 = full suppression.
     debug_logging : bool
-        Log diagnostics every 10 chunks at DEBUG level.
+        Log diagnostics every 100 hops at DEBUG level.
     """
     if atten_lim_db < 0:
         logger.warning(

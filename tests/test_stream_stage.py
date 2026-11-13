@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from livekit.plugins.hush.noise_suppressor import (
+    _FRAME_SAMPLES,
     _measure_backlog,
     _StreamStage,
 )
@@ -44,7 +45,7 @@ def _feed(rate: int, frame_ms: int, seconds: float = 3.0, **kwargs):
     return stage, frames
 
 
-def _lag(output: np.ndarray, source: np.ndarray, window: int = 4000) -> int:
+def _lag(output: np.ndarray, source: np.ndarray) -> int:
     """Delay of `output` behind `source`, in samples."""
     src = source[:2000].astype(np.float64)
     out = output[:8000].astype(np.float64)
@@ -82,6 +83,41 @@ def test_output_length_always_equals_input(rate, chunk):
     assert emitted == pushed
 
 
+# ------------------------------------------------------------------ #
+# Nothing is kept and never returned                                 #
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.parametrize("rate", (8000, 16000, 24000, 48000))
+def test_fifo_occupancy_does_not_grow_over_the_stream(rate):
+    """Audio accepted and never returned would show up as a growing FIFO."""
+    stage = _stage(rate)
+    n = int(rate * 0.010)
+    rng = np.random.default_rng(0)
+    peak = 0
+    for _ in range(600):
+        stage.push((rng.standard_normal(n) * 0.1).astype(np.float32))
+        peak = max(peak, stage.pending_output_samples)
+
+    # The FIFO swings with the converters burst, but it never accumulates.
+    assert peak <= stage.backlog_samples + 2 * n, f"FIFO grew: peak={peak}"
+
+
+@pytest.mark.parametrize("rate", (8000, 24000))
+def test_owed_audio_settles_at_the_prime(rate):
+    """The silence handed back mirrors the audio still inside the stage."""
+    stage = _stage(rate)
+    n = int(rate * 0.010)
+    rng = np.random.default_rng(0)
+    for _ in range(600):
+        stage.push((rng.standard_normal(n) * 0.1).astype(np.float32))
+
+    assert stage.owed_samples > 0
+    # Settled: what is owed is the prime, plus at most the frame of rounding.
+    assert stage.owed_samples <= stage.startup_fill_samples + 2 * n
+    assert stage.owed_samples >= stage.startup_fill_samples - 2 * n
+
+
 @pytest.mark.parametrize("rate", RATES)
 def test_hop_counter_matches_audio_clock(rate):
     """One hop per 160 samples of 16 kHz audio, at every input rate."""
@@ -104,19 +140,35 @@ def test_backlog_is_zero_at_native_rate_and_measured_otherwise():
         assert _measure_backlog(rate) > 0
 
 
+@pytest.mark.parametrize("rate", RATES)
+@pytest.mark.parametrize("frame_ms", FRAME_MS)
+def test_prime_is_backlog_plus_at_most_one_frame(rate, frame_ms):
+    """The prime is exactly the measured backlog plus rounding — no more, no less."""
+    stage, _ = _feed(rate, frame_ms)
+    need = int(rate * frame_ms / 1000)
+    hop_native = _FRAME_SAMPLES * rate // 16000
+
+    backlog = _measure_backlog(rate)
+    remainder = hop_native if need % hop_native else 0
+    if backlog:
+        target = backlog + hop_native + remainder
+    else:
+        target = remainder  # 16 kHz: no converter, only the 16 kHz remainder
+
+    # Priming stops on the first whole frame at or past the target.
+    assert target <= stage.startup_fill_samples < target + need
+
+
 @pytest.mark.parametrize("rate,frame_ms", ((8000, 10), (24000, 10), (48000, 50)))
-def test_prime_covers_the_measured_backlog_and_stops(rate, frame_ms):
+def test_prime_frames_are_silence_and_then_audio_starts(rate, frame_ms):
     stage, frames = _feed(rate, frame_ms)
     need = int(rate * frame_ms / 1000)
-    assert stage.startup_fill_samples >= _measure_backlog(rate)
-    # Whole frames are emitted, so the prime overshoots by less than one frame.
-    assert stage.startup_fill_samples < _measure_backlog(rate) + 3 * need
     prime_frames = stage.startup_fill_samples // need
-    for i, (block, out) in enumerate(frames):
+    assert prime_frames > 0
+    for i, (_, out) in enumerate(frames):
         if i < prime_frames:
             assert np.all(out == 0.0), f"frame {i} should still be priming"
-        else:
-            break
+    assert np.any(frames[prime_frames][1] != 0.0), "audio never started after the prime"
 
 
 def test_16k_needs_no_prime():
