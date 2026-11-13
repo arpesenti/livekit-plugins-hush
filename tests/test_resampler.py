@@ -104,6 +104,25 @@ def test_44100_frames_keep_the_output_count_exact():
     assert counts[1:] == [441] * 9
 
 
+@pytest.mark.parametrize("input_rate,output_rate", PAIRS)
+@pytest.mark.parametrize("chunk", (1, 7, 20, 80))
+def test_chunked_pushes_match_one_block(input_rate, output_rate, chunk):
+    """Any push size produces the same values, not merely the same count.
+
+    A short push during warm-up must not let the history index overtake the
+    next output and wrap the gather window.
+    """
+    resampler = PolyphaseResampler(input_rate, output_rate)
+    reference = PolyphaseResampler(input_rate, output_rate)
+    rng = np.random.default_rng(0)
+    signal = (rng.standard_normal(2400) * 0.1).astype(np.float32)
+
+    chunked = _feed(resampler, signal, chunk)
+    one_block = _feed(reference, signal, len(signal))
+    assert len(chunked) == len(one_block)
+    np.testing.assert_allclose(chunked, one_block, atol=1e-6)
+
+
 def test_reset_restores_the_start_of_a_stream():
     resampler = PolyphaseResampler(48000, 16000)
     rng = np.random.default_rng(1)
@@ -199,6 +218,46 @@ def test_passband_tone_passes_at_unit_gain(input_rate, output_rate):
     assert amplitude == pytest.approx(0.5, abs=2e-3), (
         f"{input_rate}->{output_rate}: passband tone at {frequency} Hz "
         f"came out at {amplitude:.4f}"
+    )
+
+
+@pytest.mark.parametrize("input_rate,output_rate", PAIRS)
+def test_passband_edge_is_flat(input_rate, output_rate):
+    """A tone at the stated passband edge must pass at unit gain, not 1 kHz."""
+    resampler = PolyphaseResampler(input_rate, output_rate)
+    frequency = resampler.passband_hz - 100.0
+    if frequency >= input_rate / 2:
+        pytest.skip("passband edge is above the input Nyquist")
+
+    n = input_rate
+    t = np.arange(n) / input_rate
+    signal = (0.5 * np.sin(2 * np.pi * frequency * t)).astype(np.float32)
+    out = _feed(resampler, signal, input_rate // 100)
+    amplitude = _tone_amplitude(out[output_rate // 2 :], output_rate, frequency)
+    assert amplitude == pytest.approx(0.5, abs=2e-3), (
+        f"{input_rate}->{output_rate}: passband edge {frequency:.0f} Hz "
+        f"came out at {amplitude:.4f}"
+    )
+
+
+@pytest.mark.parametrize("input_rate,output_rate", DECIMATING + ((16000, 8000),))
+def test_stopband_edge_is_at_least_80_db(input_rate, output_rate):
+    """The 80 dB Kaiser target is real at the stated edge, not just at +1 kHz."""
+    resampler = PolyphaseResampler(input_rate, output_rate)
+    frequency = resampler.stopband_hz + 100.0
+    if frequency >= input_rate / 2:
+        pytest.skip("stopband edge is above the input Nyquist")
+
+    n = input_rate
+    t = np.arange(n) / input_rate
+    signal = (0.5 * np.sin(2 * np.pi * frequency * t)).astype(np.float32)
+    out = _feed(resampler, signal, input_rate // 100)
+    folded = _detect_frequency(frequency, output_rate)
+    amplitude = _tone_amplitude(out[output_rate // 2 :], output_rate, folded)
+    attenuation = 20 * np.log10(max(amplitude, 1e-12) / 0.5)
+    assert attenuation <= -80.0, (
+        f"{input_rate}->{output_rate}: {frequency} Hz folded to {folded} Hz "
+        f"at {attenuation:.1f} dB"
     )
 
 

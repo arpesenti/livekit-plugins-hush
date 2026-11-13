@@ -170,9 +170,10 @@ def main() -> None:
             )
 
         source_up = _old_convert(16000, rate, speech)
-        old_up = _old_convert(16000, rate, speech)
         new_up = _new_convert(16000, rate, speech)
-        mean_up, max_up = _band_difference(old_up, new_up, rate, 100.0, passband_high)
+        mean_up, max_up = _band_difference(
+            source_up, new_up, rate, 100.0, passband_high
+        )
 
         old_down = _old_convert(rate, 16000, source_up)
         new_down = _new_convert(rate, 16000, source_up)

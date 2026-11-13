@@ -59,8 +59,6 @@ _KAISER_BETA = 0.1102 * (ANTI_ALIAS_ATTENUATION_DB - 8.7)
 class _Kernel:
     """A designed resampling kernel. Shared by every stream with the same rates."""
 
-    input_rate: int
-    output_rate: int
     num_phases: int  # L
     step: int  # M
     taps_per_phase: int  # K
@@ -69,17 +67,12 @@ class _Kernel:
     passband_hz: float
     stopband_hz: float
     # Naive output samples withheld so the stream starts at content time zero.
-    first_output: int
+    delay_output_samples: int
 
     @property
     def delay_input_samples(self) -> int:
         """Group delay in input samples. The kernel is symmetric, so it is K/2."""
         return self.taps_per_phase // 2
-
-    @property
-    def delay_output_samples(self) -> int:
-        """Group delay in output samples, as the count the stream withholds."""
-        return self.first_output
 
 
 def _design(input_rate: int, output_rate: int) -> _Kernel:
@@ -93,6 +86,8 @@ def _design(input_rate: int, output_rate: int) -> _Kernel:
     step = input_rate // divisor  # M: downsampling factor
 
     stopband_hz = min(input_rate, output_rate) / 2.0
+    # The 800 Hz transition is what every supported pair uses. The min only
+    # keeps the passband positive for a hypothetical very low rate.
     transition_hz = min(TRANSITION_HZ, stopband_hz * 0.5)
     passband_hz = stopband_hz - transition_hz
 
@@ -120,20 +115,21 @@ def _design(input_rate: int, output_rate: int) -> _Kernel:
 
     # h[p + t*L] is branch p, tap t: reshape (taps, phases) and transpose.
     branches = kernel.reshape(taps_per_phase, num_phases).T.copy()
+    # Each phase branch must have unit DC gain. This is also the xL
+    # interpolation gain: without it every branch would sum to 1/L and the
+    # output would be too quiet by L.
     branches /= branches.sum(axis=1, keepdims=True)
     coefficients = branches[:, ::-1].astype(np.float32)
 
-    first_output = ceil(taps_per_phase * num_phases / (2.0 * step))
+    delay_output_samples = ceil(taps_per_phase * num_phases / (2.0 * step))
     return _Kernel(
-        input_rate=input_rate,
-        output_rate=output_rate,
         num_phases=num_phases,
         step=step,
         taps_per_phase=taps_per_phase,
         coefficients=coefficients,
         passband_hz=passband_hz,
         stopband_hz=stopband_hz,
-        first_output=first_output,
+        delay_output_samples=delay_output_samples,
     )
 
 
@@ -156,15 +152,7 @@ class PolyphaseResampler:
         self._kernel = _cached_kernel(input_rate, output_rate)
         self._tail = np.zeros(self._kernel.taps_per_phase - 1, dtype=np.float32)
         self._input_count = 0
-        self._next_output = self._kernel.first_output
-
-    @property
-    def input_rate(self) -> int:
-        return self._kernel.input_rate
-
-    @property
-    def output_rate(self) -> int:
-        return self._kernel.output_rate
+        self._next_output = self._kernel.delay_output_samples
 
     @property
     def num_phases(self) -> int:
@@ -202,7 +190,7 @@ class PolyphaseResampler:
         """Forget the stream. The next push starts a fresh, silent history."""
         self._tail = np.zeros(self._kernel.taps_per_phase - 1, dtype=np.float32)
         self._input_count = 0
-        self._next_output = self._kernel.first_output
+        self._next_output = self._kernel.delay_output_samples
 
     def push(self, samples: np.ndarray) -> np.ndarray:
         """Resample one block; return the output samples that are ready."""
@@ -225,6 +213,8 @@ class PolyphaseResampler:
             phases = (indices * kernel.step) % kernel.num_phases
             input_positions = (indices * kernel.step - phases) // kernel.num_phases
             starts = input_positions - self._input_count
+            if starts.size and starts.min() < 0:  # pragma: no cover - invariant
+                raise RuntimeError("polyphase history underrun")
             windows = np.lib.stride_tricks.sliding_window_view(buffer, taps)[starts]
             output = np.einsum("ij,ij->i", windows, kernel.coefficients[phases])
 

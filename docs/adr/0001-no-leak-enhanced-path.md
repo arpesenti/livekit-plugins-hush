@@ -20,7 +20,7 @@ enhanced path. Frame-in is decoupled from hop-in: an output FIFO emits exactly a
 arrived, and a shortfall at the head of the stream is absorbed by priming it with silence. In
 this first implementation the prime was deterministic and measured per rate — the converters were
 probed once per stream for the worst-case amount they held back. (The follow-up below replaces
-that probe with the converters' declared `kernel/2` delay and sub-frame padding; the no-leak
+that probe with the converters' declared `kernel/2` delay and sub-frame priming; the no-leak
 decision is unchanged.) `strength == 0` and
 `enabled == False` remain true bypasses (untouched, no inference, no resampling). `_process`
 never raises: a model failure emits silence and increments a counter, because the host's own

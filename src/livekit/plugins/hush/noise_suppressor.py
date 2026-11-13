@@ -162,7 +162,7 @@ class _StreamStage:
 
         # Counters. Never reset: they describe the lifetime of the stream.
         self.hops_processed = 0
-        self.prime_samples = 0  # silence emitted while the converters filled
+        self.prime_samples = 0  # silence emitted to cover delay + hop jitter
         self.underruns = 0  # unexpected: must stay 0 in steady state
         self.failures = 0  # inference or processing failures, answered with silence
 
@@ -205,6 +205,8 @@ class _StreamStage:
             return
         self._down = PolyphaseResampler(rate, _SAMPLE_RATE)
         self._up = PolyphaseResampler(_SAMPLE_RATE, rate)
+        # Down's delay is in native input samples; the up converter's
+        # withheld count is already in native output samples.
         self._declared_delay = (
             self._down.delay_input_samples + self._up.delay_output_samples
         )
@@ -216,7 +218,7 @@ class _StreamStage:
             return np.zeros(0, dtype=np.float32)
 
         # 1. native rate → 16 kHz. The converter withholds its declared
-        # delay at the head; the padding below pays for it.
+        # delay at the head; the prime below pays for it.
         arrived = self._down.push(samples) if self._down is not None else samples
 
         if len(arrived):
@@ -233,7 +235,7 @@ class _StreamStage:
         # 3. wet/dry in one timebase, then 16 kHz → native
         self._flush_wet()
 
-        # 4. Deliver exactly what arrived. A shortfall is filled with silence
+        # 4. Deliver exactly what arrived. A shortfall is primed with silence
         # at the head of the same frame, so priming is never quantised to a
         # whole frame: the audio starts where the converters' delay ends.
         available = len(self._out_q)
@@ -243,19 +245,19 @@ class _StreamStage:
             self._primed = True
             return out
 
-        pad = need - available
+        gap = need - available
         out = np.zeros(need, dtype=np.float32)
         if available:
-            out[pad:] = self._out_q.peek(available)
+            out[gap:] = self._out_q.peek(available)
             self._out_q.popleft(available)
-        self.prime_samples += pad
+        self.prime_samples += gap
 
-        if self._primed and self._hop_native and pad > self._hop_native:
+        if self._primed and self._hop_native and gap > self._hop_native:
             self.underruns += 1
             if self.underruns == 1:
                 logger.warning(
                     "Hush output FIFO underrun (%d samples short); emitting silence",
-                    pad,
+                    gap,
                 )
         if self.prime_samples >= self._declared_delay + self._hop_native:
             self._primed = True
@@ -372,7 +374,7 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
 
     @property
     def prime_samples(self) -> int:
-        """Silence emitted while the converters filled, across this instance."""
+        """Silence emitted to cover the converters' delay, across this instance."""
         return self._stage.prime_samples
 
     @property

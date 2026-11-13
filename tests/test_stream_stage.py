@@ -79,7 +79,11 @@ def test_never_emits_its_own_input(rate, frame_ms):
     stage, frames = _feed(rate, frame_ms, seconds=30.0)
     for i, (block, out) in enumerate(frames):
         assert len(out) == len(block), f"frame {i}: length changed"
+        # The leak mode is a whole-frame fallback, not a 1-LSB mix. At 16 kHz
+        # there is no converter, so the model's marker is exact.
         assert not np.array_equal(out, block), f"frame {i}: raw input leaked"
+        if rate == _SAMPLE_RATE:
+            np.testing.assert_array_almost_equal(out, block * 0.5, decimal=6)
     assert stage.underruns == 0, f"steady-state underrun at {rate} Hz / {frame_ms} ms"
     assert stage.hops_processed > 0
 
@@ -289,7 +293,10 @@ def test_added_delay_is_flat_across_the_matrix(rate, frame_ms):
     "rate,frame_ms", ((8000, 10), (8000, 50), (24000, 10), (48000, 50))
 )
 def test_no_silent_frames_inside_a_tone(rate, frame_ms):
-    """Silence then a 440 Hz tone: once the tone starts, nothing goes silent."""
+    """Silence then a 440 Hz tone: once the tone starts, nothing goes silent.
+
+    This is the silence → tone marker test from ADR-0001 / issue #1.
+    """
     stage = _stage(rate)
     n = int(rate * frame_ms / 1000)
     frames_per_second = int(1000 / frame_ms)

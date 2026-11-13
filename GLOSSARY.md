@@ -19,7 +19,14 @@ inference call.
 _Avoid_: frame, window, chunk
 
 **Native rate**:
+The host's frame sample rate — 8/16/24/32/44.1/48 kHz. Output is delivered at the same rate as
+input, so the stage returns to it after the model. 16 kHz is also the model rate and needs no
+converter.
+_Avoid_: host rate, output rate
+
+**Model rate**:
 16 kHz — the only rate the model runs at.
+_Avoid_: native rate (when 16 kHz specifically is meant), network rate
 
 ### Timing
 

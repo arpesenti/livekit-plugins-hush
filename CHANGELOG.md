@@ -5,7 +5,7 @@
 **Fixed:**
 
 - **The delay the enhanced path adds is now ~13 ms at every rate and frame
-  size**, down from 120–300 ms at 24–48 kHz and 240–300 ms at 8 kHz. 16 kHz
+  size**, down from 120–200 ms at 24–48 kHz and 240–300 ms at 8 kHz. 16 kHz
   stays at 0 ms. `rtc.AudioResampler` no longer touches the enhanced path:
   `_resampler.py` is an in-repo streaming polyphase windowed-sinc resampler
   whose delay is declared as half its kernel (3.1–3.3 ms per converter), not

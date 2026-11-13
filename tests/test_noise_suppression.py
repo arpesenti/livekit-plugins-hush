@@ -821,8 +821,8 @@ class TestCoverageGaps:
             f"Expected 4410 samples, got {result.samples_per_channel}"
         )
 
-    def test_resampler_flush_on_rate_change(self, monkeypatch):
-        """Mid-session rate switch triggers resampler flush code path."""
+    def test_rate_change_rebuilds_the_converters(self, monkeypatch):
+        """Mid-session rate switch rebuilds the converter state and re-primes."""
         _patch_module(monkeypatch)
         import livekit.plugins.hush.noise_suppressor as ns_module
 

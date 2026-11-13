@@ -69,7 +69,7 @@ LiveKit AudioFrame (any rate, any channels)
   → Pure-numpy streaming ISTFT
   → wet/dry blend (both sides at the same FIFO position)
   → upsample, restore channels
-  → output FIFO: pad any gap with silence at the head of the frame,
+  → output FIFO: fill any gap with silence at the head of the frame,
     then emit exactly as many samples as arrived
 → AudioFrame
 ```
@@ -84,7 +84,7 @@ silence at the head of that frame, never with the unenhanced input — see
 Rate conversion is an in-repo streaming polyphase (windowed-sinc) resampler, not
 `rtc.AudioResampler`. Each converter has a declared delay of **half its kernel** — 3.1–3.3 ms per
 converter at every rate — and the stage pays that delay with silence at the head of the stream.
-The padding is sub-frame: the first frame can carry silence followed by audio, so the prime never
+The priming is sub-frame: the first frame can carry silence followed by audio, so the prime never
 rounds up to a whole frame.
 
 | Input rate | 10 ms frames | 20 ms frames | 50 ms frames | 100 ms frames |
