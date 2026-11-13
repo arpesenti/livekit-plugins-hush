@@ -16,25 +16,98 @@ per-stream DF state and audio buffers.
 Memory per worker: ~40 MB (onnxruntime + model) + N × ~1 MB (per session).
 
 Drop-in replacement for livekit-plugins-noise-cancellation / ai-coustics.
+
+Streaming contract: a frame in always produces a frame of the same length
+out, drawn from the enhanced path. The frame rate the host uses and the
+model's 160-sample hop are decoupled by ``_StreamStage``, which buffers,
+resamples and — at the head of a stream only — emits silence so the model
+never has to be bypassed. See ``docs/adr/0001-no-leak-enhanced-path.md``.
 """
 
 import logging
 import os
-from typing import Optional
+from collections.abc import Callable
 
 import numpy as np
+
 from livekit import rtc
 
 from ._hush_model import (
-    HushSession,
     _FRAME_SAMPLES,
     _SAMPLE_RATE,
+    HushSession,
     _get_shared_model,
 )
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
+
+#: Converts one 160-sample hop at 16 kHz into enhanced audio.
+HopProcessor = Callable[[np.ndarray], np.ndarray]
+
+
+def _frame_to_float(frame: rtc.AudioFrame) -> np.ndarray:
+    return np.frombuffer(frame.data, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def _to_int16_frame(samples: np.ndarray, sample_rate: int) -> rtc.AudioFrame:
+    pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+    return rtc.AudioFrame(
+        data=pcm.tobytes(),
+        sample_rate=sample_rate,
+        num_channels=1,
+        samples_per_channel=len(pcm),
+    )
+
+
+def _measure_backlog(rate: int, seconds: float = 0.5) -> int:
+    """Native-rate samples the converter pair can hold back at its worst.
+
+    A streaming resampler buffers before it returns anything, and the amount
+    it holds oscillates over its burst cycle. The peak is the dead time the
+    stage cannot see through its own FIFO: sound has to be delayed by that
+    much before any of it can be delivered, so the stage primes with silence
+    for this many samples. Measured, never assumed: it differs per rate (and
+    would differ again if the converter were swapped out).
+    """
+    if rate == _SAMPLE_RATE:
+        return 0
+
+    down = rtc.AudioResampler(
+        input_rate=rate,
+        output_rate=_SAMPLE_RATE,
+        num_channels=1,
+        quality=rtc.AudioResamplerQuality.MEDIUM,
+    )
+    up = rtc.AudioResampler(
+        input_rate=_SAMPLE_RATE,
+        output_rate=rate,
+        num_channels=1,
+        quality=rtc.AudioResamplerQuality.MEDIUM,
+    )
+    n_native = int(rate * _FRAME_SAMPLES / _SAMPLE_RATE)
+    silence = np.zeros(n_native, dtype=np.int16)
+    pushed = 0
+    delivered = 0
+    peak = 0
+    for _ in range(int(seconds * 100)):
+        frame = rtc.AudioFrame(
+            data=silence.tobytes(),
+            sample_rate=rate,
+            num_channels=1,
+            samples_per_channel=n_native,
+        )
+        pushed += n_native
+        blocks = [_frame_to_float(f) for f in down.push(frame)]
+        if blocks:
+            block = np.concatenate(blocks)
+            block = block[: len(block) - len(block) % _FRAME_SAMPLES]
+            if len(block):
+                for f in up.push(_to_int16_frame(block, _SAMPLE_RATE)):
+                    delivered += f.samples_per_channel
+        peak = max(peak, pushed - delivered)
+    return peak
 
 
 class _QueueBuffer:
@@ -90,6 +163,218 @@ class _QueueBuffer:
         self._end = 0
 
 
+class _StreamStage:
+    """Decouples frame-in from hop-in for one stream.
+
+    A frame arriving at the native rate is converted to 16 kHz, cut into
+    whole 160-sample hops, run through the model, blended with its own dry
+    signal and converted back. ``push()`` always returns exactly as many
+    samples as it was given.
+
+    A streaming resampler returns its samples in bursts, so it routinely
+    has nothing to hand back, and its burst size is not a multiple of the
+    hop. The output FIFO therefore absorbs the deficit: while it cannot
+    fill a frame, the stage emits silence (the *prime*). Because input and
+    output rates are equal in the long run, the prime settles at exactly
+    the converters' backlog and no further shortfall occurs; a shortfall
+    after the first successful frame is an *underrun* and is counted.
+    """
+
+    def __init__(
+        self,
+        strength: float,
+        process_hop: HopProcessor,
+        debug_logging: bool = False,
+    ) -> None:
+        self._strength = strength
+        self._process_hop = process_hop
+        self._debug_logging = debug_logging
+        self._debug_frame_count = 0
+
+        self._in_q = _QueueBuffer()  # 16 kHz, awaiting a whole hop
+        self._wet_q = _QueueBuffer()  # 16 kHz, model output awaiting blend
+        self._dry_q = _QueueBuffer() if strength < 1.0 else None  # 16 kHz input
+        self._out_q = _QueueBuffer()  # native rate, awaiting delivery
+
+        self._down: rtc.AudioResampler | None = None
+        self._up: rtc.AudioResampler | None = None
+        self._rate = 0
+        self._backlog = 0
+
+        # Counters. Never reset: they describe the lifetime of the stream.
+        self.hops_processed = 0
+        self.startup_fill_samples = 0  # expected: the prime
+        self.underruns = 0  # unexpected: must stay 0 in steady state
+        self.model_failures = 0
+
+    @property
+    def rate(self) -> int:
+        """Native rate the stage is configured for, or 0 before the first frame."""
+        return self._rate
+
+    @property
+    def pending_output_samples(self) -> int:
+        """Samples accepted but not yet delivered (dropped when the stream ends)."""
+        return len(self._out_q)
+
+    @property
+    def backlog_samples(self) -> int:
+        """Native-rate samples the converters hold back at their worst."""
+        return self._backlog
+
+    def reset(self) -> None:
+        """Forget everything buffered. The next frame re-derives the rate."""
+        self._in_q.clear()
+        self._wet_q.clear()
+        self._out_q.clear()
+        if self._dry_q is not None:
+            self._dry_q.clear()
+        self._down = None
+        self._up = None
+        self._rate = 0
+        self._backlog = 0
+        self._debug_frame_count = 0
+
+    def rebuild(self, rate: int) -> None:
+        """(Re)configure for a native sample rate, discarding buffered audio."""
+        self.reset()
+        self._rate = rate
+        self._backlog = _measure_backlog(rate)
+        if rate != _SAMPLE_RATE:
+            self._down = rtc.AudioResampler(
+                input_rate=rate,
+                output_rate=_SAMPLE_RATE,
+                num_channels=1,
+                quality=rtc.AudioResamplerQuality.MEDIUM,
+            )
+            self._up = rtc.AudioResampler(
+                input_rate=_SAMPLE_RATE,
+                output_rate=rate,
+                num_channels=1,
+                quality=rtc.AudioResamplerQuality.MEDIUM,
+            )
+
+    def push(self, samples: np.ndarray) -> np.ndarray:
+        """Feed one frame's samples in; get exactly as many back."""
+        need = len(samples)
+        if need == 0:
+            return np.zeros(0, dtype=np.float32)
+
+        # 1. native rate → 16 kHz (the converter hands back 0..N samples)
+        if self._down is not None:
+            blocks = [
+                _frame_to_float(f)
+                for f in self._down.push(_to_int16_frame(samples, self._rate))
+            ]
+            arrived = np.concatenate(blocks) if blocks else np.zeros(0, np.float32)
+        else:
+            arrived = samples
+
+        if len(arrived):
+            self._in_q.append(arrived)
+            if self._dry_q is not None:
+                self._dry_q.append(arrived)
+
+        # 2. whole hops → model
+        while len(self._in_q) >= _FRAME_SAMPLES:
+            hop = self._in_q.peek(_FRAME_SAMPLES)
+            self._in_q.popleft(_FRAME_SAMPLES)
+            self._wet_q.append(self._run_hop(hop))
+
+        # 3. wet/dry in one timebase, then 16 kHz → native
+        self._flush_wet()
+
+        # 4. prime, then deliver exactly what arrived
+        if self.startup_fill_samples < self._prime_target(need):
+            # The converters are still filling. Nothing buffered is consumed,
+            # so every sample arrives late — none is lost, none is bypassed.
+            self.startup_fill_samples += need
+            return np.zeros(need, dtype=np.float32)
+
+        if len(self._out_q) < need:
+            return self._on_shortfall(need)
+
+        out = self._out_q.peek(need).copy()
+        self._out_q.popleft(need)
+        return out
+
+    def _run_hop(self, hop: np.ndarray) -> np.ndarray:
+        try:
+            out = self._process_hop(hop)
+        except Exception:
+            # The host's own fallback is to hand the raw frame downstream, so
+            # never let an inference failure become a leak: keep the clock
+            # honest with silence and surface it in the counters.
+            self.model_failures += 1
+            if self.model_failures == 1:
+                logger.exception(
+                    "Hush inference failed; emitting silence for this hop "
+                    "(failures=%d)",
+                    self.model_failures,
+                )
+            out = np.zeros(_FRAME_SAMPLES, dtype=np.float32)
+
+        self.hops_processed += 1
+        if self._debug_logging:
+            if self._debug_frame_count % 100 == 0:
+                logger.debug(
+                    "Hush frame: input_rms=%.5f output_rms=%.5f strength=%.2f",
+                    float(np.sqrt(np.mean(hop**2))),
+                    float(np.sqrt(np.mean(out**2))),
+                    self._strength,
+                )
+            self._debug_frame_count += 1
+        return out
+
+    def _flush_wet(self) -> None:
+        """Blend and convert everything the model has produced so far."""
+        while len(self._wet_q) > 0:
+            n = len(self._wet_q)
+            wet = self._wet_q.peek(n).copy()
+            self._wet_q.popleft(n)
+            if self._dry_q is not None:
+                # Dry is appended in lockstep with the input, so its head is
+                # the same instant as the wet head — never a different one.
+                dry = self._dry_q.peek(n)
+                self._dry_q.popleft(n)
+                wet = self._strength * wet + (1.0 - self._strength) * dry
+            self._to_native(wet)
+
+    def _to_native(self, block: np.ndarray) -> None:
+        if self._up is None:
+            self._out_q.append(block)
+            return
+        for f in self._up.push(_to_int16_frame(block, _SAMPLE_RATE)):
+            self._out_q.append(_frame_to_float(f))
+
+    def _prime_target(self, need: int) -> int:
+        """Silence to emit before the enhanced path can be trusted to keep up.
+
+        The measured worst-case converter backlog, plus a hop's worth for the
+        16 kHz remainder the stage itself hides, plus one more when the native
+        hop is not a whole number of frames. Deterministic: priming runs to
+        this count and does not stop at the first frame that happens to fill,
+        because that is exactly the situation that leaks or drops later. Zero
+        at 16 kHz — no converter, so nothing to cover.
+        """
+        if self._backlog == 0:
+            # No converter: only the 16 kHz remainder can leave us short.
+            hop_native = _FRAME_SAMPLES * self._rate // _SAMPLE_RATE
+            return hop_native if self._rate and need % hop_native else 0
+        hop_native = _FRAME_SAMPLES * self._rate // _SAMPLE_RATE
+        extra = hop_native if need % hop_native else 0
+        return self._backlog + hop_native + extra
+
+    def _on_shortfall(self, need: int) -> np.ndarray:
+        self.underruns += 1
+        if self.underruns == 1:
+            logger.warning(
+                "Hush output FIFO underrun (%d samples wanted); emitting silence",
+                need,
+            )
+        return np.zeros(need, dtype=np.float32)
+
+
 class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
     """In-process Hush noise suppressor for self-hosted LiveKit.
 
@@ -98,7 +383,7 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
 
     def __init__(
         self,
-        model_path: Optional[str] = None,
+        model_path: str | None = None,
         atten_lim_db: float = 100.0,
         strength: float = 0.5,
         debug_logging: bool = False,
@@ -115,22 +400,15 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
 
         # Shared ONNX model (one per process, loaded lazily on first use)
         shared_model = _get_shared_model(model_path)
-        self._session: HushSession = HushSession(shared_model, atten_lim_db)
-
-        # Input/output queues for handling arbitrary LiveKit frame sizes.
-        # _dry_queue is lazy: only used when strength < 1.0.
-        self._input_queue: _QueueBuffer = _QueueBuffer()
-        self._output_queue: _QueueBuffer = _QueueBuffer()
-        self._dry_queue: _QueueBuffer | None = None
+        self._session: HushSession | None = HushSession(shared_model, atten_lim_db)
 
         self._strength = max(0.0, min(1.0, strength))
         self._debug_logging = debug_logging
-        self._debug_frame_count = 0
-
-        # Resamplers — created lazily on the first frame
-        self._downsampler: rtc.AudioResampler | None = None
-        self._upsampler: rtc.AudioResampler | None = None
-        self._native_rate: int = 0
+        self._stage = _StreamStage(
+            strength=self._strength,
+            process_hop=self._process_hop,
+            debug_logging=debug_logging,
+        )
 
         self._enabled = True
 
@@ -144,7 +422,31 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
 
     @enabled.setter
     def enabled(self, value: bool) -> None:
+        if value and not self._enabled:
+            # Resuming after a pause: stale audio in the buffers belongs to a
+            # moment the consumer never heard.
+            self._stage.reset()
         self._enabled = value
+
+    @property
+    def hops_processed(self) -> int:
+        """Model hops run so far — must advance even when frames are large."""
+        return self._stage.hops_processed
+
+    @property
+    def startup_fill_samples(self) -> int:
+        """Samples of priming silence emitted at the head of the stream."""
+        return self._stage.startup_fill_samples
+
+    @property
+    def underruns(self) -> int:
+        """Frames that could not be filled after the prime — expected to be 0."""
+        return self._stage.underruns
+
+    @property
+    def model_failures(self) -> int:
+        """Hops where inference raised and silence was substituted."""
+        return self._stage.model_failures
 
     def _on_stream_info_updated(
         self,
@@ -153,145 +455,29 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
         participant_identity: str,
         publication_sid: str,
     ) -> None:
-        self._session.reset_state()
+        self._stage.reset()
+        if self._session is not None:
+            self._session.reset_state()
+
+    def _process_hop(self, hop: np.ndarray) -> np.ndarray:
+        if self._session is None:
+            raise RuntimeError("Hush session is closed")
+        return self._session.process_frame(hop)
 
     def _process(self, frame: rtc.AudioFrame) -> rtc.AudioFrame:
-        if not self._enabled:
+        if not self._enabled or self._strength <= 0.0:
+            # Intentional bypass: untouched, no inference, no resampling.
             return frame
 
-        # Lazily create resamplers when we learn the incoming sample rate
-        if frame.sample_rate != self._native_rate:
-            # Flush existing resamplers before destroying them so internal
-            # filter state / buffered samples are drained rather than lost.
-            if self._downsampler is not None:
-                flushed = self._downsampler.flush()
-                for f in flushed:
-                    s = (
-                        np.frombuffer(f.data, dtype=np.int16).astype(np.float32)
-                        / 32768.0
-                    )
-                    self._input_queue.append(s)
-                self._downsampler = None
-            if self._upsampler is not None:
-                self._upsampler.flush()
-                self._upsampler = None
+        if frame.sample_rate != self._stage.rate:
+            self._stage.rebuild(frame.sample_rate)
 
-            self._native_rate = frame.sample_rate
-            if frame.sample_rate != _SAMPLE_RATE:
-                self._downsampler = rtc.AudioResampler(
-                    input_rate=frame.sample_rate,
-                    output_rate=_SAMPLE_RATE,
-                    num_channels=1,
-                    quality=rtc.AudioResamplerQuality.MEDIUM,
-                )
-                self._upsampler = rtc.AudioResampler(
-                    input_rate=_SAMPLE_RATE,
-                    output_rate=frame.sample_rate,
-                    num_channels=1,
-                    quality=rtc.AudioResamplerQuality.MEDIUM,
-                )
-
-        # Convert int16 → float32 mono
-        samples = np.frombuffer(frame.data, dtype=np.int16).astype(np.float32) / 32768.0
+        samples = _frame_to_float(frame)
         if frame.num_channels > 1:
             samples = samples.reshape(-1, frame.num_channels).mean(axis=1)
 
-        # Build a mono AudioFrame for the resampler
-        mono_int16 = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
-        mono_frame = rtc.AudioFrame(
-            data=mono_int16.tobytes(),
-            sample_rate=frame.sample_rate,
-            num_channels=1,
-            samples_per_channel=len(mono_int16),
-        )
+        out_samples = self._stage.push(samples)
 
-        # Downsample to 16 kHz
-        if self._downsampler is not None:
-            frames_16k = self._downsampler.push(mono_frame)
-        else:
-            frames_16k = [mono_frame]
-
-        if not frames_16k:
-            return frame
-
-        samples_16k = np.concatenate(
-            [
-                np.frombuffer(f.data, dtype=np.int16).astype(np.float32) / 32768.0
-                for f in frames_16k
-            ]
-        )
-
-        self._input_queue.append(samples_16k)
-        if self._strength < 1.0:
-            if self._dry_queue is None:
-                self._dry_queue = _QueueBuffer()
-            self._dry_queue.append(samples_16k)
-
-        # Process in 10 ms frames (160 samples at 16 kHz)
-        while len(self._input_queue) >= _FRAME_SAMPLES:
-            frame_in = self._input_queue.peek(_FRAME_SAMPLES)
-            self._input_queue.popleft(_FRAME_SAMPLES)
-
-            frame_out = self._session.process_frame(frame_in)
-
-            self._output_queue.append(frame_out)
-
-            if self._debug_logging:
-                if self._debug_frame_count % 100 == 0:
-                    logger.debug(
-                        "Hush frame: input_rms=%.5f output_rms=%.5f strength=%.2f",
-                        float(np.sqrt(np.mean(frame_in**2))),
-                        float(np.sqrt(np.mean(frame_out**2))),
-                        self._strength,
-                    )
-                self._debug_frame_count += 1
-
-        # Drain the same number of samples that went IN
-        n_16k = len(samples_16k)
-        if len(self._output_queue) < n_16k:
-            return frame  # resampler produced no output yet
-
-        out_16k = self._output_queue.peek(n_16k)
-        self._output_queue.popleft(n_16k)
-
-        # Wet/dry blend
-        if self._strength < 1.0 and self._dry_queue is not None:
-            dry_16k = self._dry_queue.peek(n_16k)
-            self._dry_queue.popleft(n_16k)
-            out_16k = self._strength * out_16k + (1.0 - self._strength) * dry_16k
-
-        # Build 16 kHz AudioFrame and upsample back
-        out_int16_16k = (np.clip(out_16k, -1.0, 1.0) * 32767.0).astype(np.int16)
-        out_frame_16k = rtc.AudioFrame(
-            data=out_int16_16k.tobytes(),
-            sample_rate=_SAMPLE_RATE,
-            num_channels=1,
-            samples_per_channel=len(out_int16_16k),
-        )
-
-        if self._upsampler is not None:
-            out_frames = self._upsampler.push(out_frame_16k)
-        else:
-            out_frames = [out_frame_16k]
-
-        if not out_frames:
-            return frame
-
-        out_samples = np.concatenate(
-            [
-                np.frombuffer(f.data, dtype=np.int16).astype(np.float32) / 32768.0
-                for f in out_frames
-            ]
-        )
-
-        # Trim or pad to exactly match the input frame length
-        target = frame.samples_per_channel
-        if len(out_samples) > target:
-            out_samples = out_samples[:target]
-        elif len(out_samples) < target:
-            out_samples = np.pad(out_samples, (0, target - len(out_samples)))
-
-        # Restore original channel count
         if frame.num_channels > 1:
             out_samples = np.repeat(out_samples, frame.num_channels)
 
@@ -305,10 +491,10 @@ class HushNoiseSuppressor(rtc.FrameProcessor[rtc.AudioFrame]):
 
     def _close(self) -> None:
         self._enabled = False
-        if self._downsampler is not None:
-            self._downsampler = None
-        if self._upsampler is not None:
-            self._upsampler = None
+        pending = self._stage.pending_output_samples
+        if pending:
+            logger.debug("closing Hush stream, discarding %d buffered samples", pending)
+        self._stage.reset()
         if self._session is not None:
             self._session.close()
             self._session = None

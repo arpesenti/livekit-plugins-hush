@@ -96,14 +96,28 @@ def mock_suppressor(monkeypatch):
 class TestFrameProcessing:
     """Tests for HushNoiseSuppressor._process with mocked inference."""
 
-    def test_smaller_than_frame(self, mock_suppressor):
-        """Fewer samples than a frame → pass through unprocessed."""
-        samples = np.random.default_rng(42).uniform(-0.5, 0.5, 80).astype(np.float32)
-        frame = create_audio_frame(samples)
-        result = mock_suppressor._process(frame)
+    def test_shorter_than_a_hop_is_not_passed_through(self, mock_suppressor):
+        """A frame shorter than one hop is primed with silence, never echoed back."""
+        rng = np.random.default_rng(42)
+        first = rng.uniform(-0.5, 0.5, 80).astype(np.float32)
+        result = mock_suppressor._process(create_audio_frame(first))
         out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
         assert len(out) == 80
-        np.testing.assert_array_almost_equal(out, samples, decimal=4)
+        assert np.all(out == 0.0), "the prime must be silence, not the input"
+        assert mock_suppressor.hops_processed == 0
+
+        # A hop of lead is primed before delivery starts, then the model fills.
+        second = rng.uniform(-0.5, 0.5, 80).astype(np.float32)
+        mock_suppressor._process(create_audio_frame(second))
+        assert mock_suppressor.startup_fill_samples == 2 * 80
+
+        third = rng.uniform(-0.5, 0.5, 80).astype(np.float32)
+        result = mock_suppressor._process(create_audio_frame(third))
+        out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+        assert len(out) == 80
+        assert mock_suppressor.hops_processed == 1
+        assert mock_suppressor.underruns == 0
+        np.testing.assert_array_almost_equal(out, first * 0.5, decimal=3)
 
     def test_exact_frame(self, mock_suppressor):
         """Exactly one 10 ms frame (160 samples)."""
@@ -200,6 +214,34 @@ class TestFrameProcessing:
         result = mock_suppressor._process(frame)
         assert result.num_channels == 2
         assert result.samples_per_channel == 160
+
+    @pytest.mark.parametrize("rate", (8000, 16000, 24000, 32000, 48000))
+    @pytest.mark.parametrize("frame_ms", (10, 20, 50))
+    def test_no_frame_is_returned_unenhanced(self, mock_suppressor, rate, frame_ms):
+        """A frame never comes back as its own input, at any rate or frame size."""
+        n = int(rate * frame_ms / 1000)
+        rng = np.random.default_rng(0)
+        for _ in range(100):
+            samples = rng.uniform(-0.5, 0.5, n).astype(np.float32)
+            frame = create_audio_frame(samples, sample_rate=rate)
+            result = mock_suppressor._process(frame)
+            quantized = (
+                np.frombuffer(frame.data, dtype=np.int16).astype(np.float32) / 32768.0
+            )
+            out = (
+                np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+            )
+            assert result is not frame
+            assert result.sample_rate == rate
+            assert result.samples_per_channel == n
+            assert not np.array_equal(out, quantized), (
+                f"raw input leaked at {rate} Hz / {frame_ms} ms"
+            )
+
+        assert mock_suppressor.underruns == 0, (
+            f"steady-state underrun at {rate} Hz / {frame_ms} ms"
+        )
+        assert mock_suppressor.hops_processed > 0
 
 
 # ------------------------------------------------------------------ #
@@ -470,23 +512,26 @@ class TestCoverageGaps:
         assert ns.enabled is False
 
     def test_short_audio_buffers_during_startup(self, monkeypatch):
-        """Audio shorter than a frame is buffered; original frame returned during resampler warmup."""
+        """16 kHz hop-aligned frames need no prime: enhanced from the first frame."""
         _patch_module(monkeypatch)
         import livekit.plugins.hush.noise_suppressor as ns_module
 
         ns = ns_module.HushNoiseSuppressor(strength=1.0)
-        # Override _FRAME_SAMPLES back to real value for this test
         monkeypatch.setattr(ns_module, "_FRAME_SAMPLES", 160)
 
-        # Push 80 samples (less than a frame) — passes through
         rng = np.random.default_rng(42)
-        samples = rng.uniform(-0.5, 0.5, 80).astype(np.float32)
-        frame = create_audio_frame(samples)
-        result = ns._process(frame)
-        out = np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
-        assert len(out) == 80
-        # Should be unmodified (still buffering)
-        np.testing.assert_array_almost_equal(out, samples, decimal=4)
+        for _ in range(3):
+            samples = rng.uniform(-0.5, 0.5, 160).astype(np.float32)
+            result = ns._process(create_audio_frame(samples))
+            out = (
+                np.frombuffer(result.data, dtype=np.int16).astype(np.float32) / 32768.0
+            )
+            assert len(out) == 160
+            np.testing.assert_array_almost_equal(out, samples * 0.5, decimal=3)
+
+        assert ns.startup_fill_samples == 0
+        assert ns.hops_processed == 3
+        assert ns.underruns == 0
 
     def test_model_not_found_raises(self):
         """Nonexistent model path raises FileNotFoundError."""
@@ -533,17 +578,14 @@ class TestCoverageGaps:
         with pytest.raises(ValueError, match="requires 160 samples"):
             session.process_frame(short)
 
-    def test_trim_pad_output(self, monkeypatch):
-        """Output trimming and padding paths when resampler length mismatches."""
+    def test_output_length_matches_input_at_48k(self, monkeypatch):
+        """48 kHz input: output keeps the input's length exactly."""
         _patch_module(monkeypatch)
         import livekit.plugins.hush.noise_suppressor as ns_module
 
-        # Test with 48kHz input to force resampling, which can cause
-        # output/input length mismatch
         ns = ns_module.HushNoiseSuppressor(strength=1.0)
         rng = np.random.default_rng(42)
 
-        # Generate enough samples for one full chunk after resampling
         samples = rng.uniform(-0.5, 0.5, 16000).astype(np.float32)
         int16_data = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
         frame = rtc.AudioFrame(
@@ -553,11 +595,10 @@ class TestCoverageGaps:
             samples_per_channel=16000,
         )
         result = ns._process(frame)
-        # Output length must match input length (trim/pad logic exercised)
         assert result.samples_per_channel == 16000
 
-    def test_trim_pad_output_mismatch(self, monkeypatch):
-        """Trim/pad with 44.1kHz — non-integer ratio guarantees a length mismatch."""
+    def test_output_length_matches_input_at_44k(self, monkeypatch):
+        """44.1 kHz: non-integer ratio still keeps the input's length exactly."""
         _patch_module(monkeypatch)
         import livekit.plugins.hush.noise_suppressor as ns_module
 
@@ -573,7 +614,6 @@ class TestCoverageGaps:
             samples_per_channel=4410,
         )
         result = ns._process(frame)
-        # The trim/pad must match input length exactly
         assert result.samples_per_channel == 4410, (
             f"Expected 4410 samples, got {result.samples_per_channel}"
         )
